@@ -1,0 +1,30 @@
+
+  :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; width:100%; height:100%; overflow:hidden; background: #000000; }
+  canvas { display:block; width:100%; height:100%; touch-action:none; cursor:crosshair; }
+  #ui { position:fixed; z-index:10; right:20px; top:20px; width:260px; padding:18px; background:rgba(8,17,24,.88); border:1px solid rgba(235,249,255,.18); border-radius:18px; box-shadow:0 16px 60px #0006; backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px); color:#ecf6f8; transition:opacity .25s,transform .25s; }
+  #ui { max-height:calc(100dvh - 40px); overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; }
+  #ui.off { opacity:0; pointer-events:none; transform:translateY(-7px); visibility:hidden; }
+  select { width:100%; min-height:44px; padding:10px 30px 10px 11px; border:1px solid #ffffff36; border-radius:9px; background:#14252e; color:#ecf8fa; font:inherit; font-size:12px; cursor:pointer; }
+  :is(button,input,select):focus-visible { outline:2px solid #a5e7e6; outline-offset:3px; }
+  .top { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:19px; }
+  h1 { margin:0; font-size:14px; font-weight:620; letter-spacing:.12em; } .muted { color:#96abb5; font-size:11px; margin-top:5px; }
+  .close { border:0; background:none; color:#dbe6e7; font-size:21px; cursor:pointer; margin-top:-6px; margin-right:-4px; }
+  .field { margin:0 0 18px; } .field-label { display:flex; justify-content:space-between; align-items:center; font-size:12px; font-weight:510; margin-bottom:10px; } output { color:#9cbbc5; font-size:11px; font-variant-numeric:tabular-nums; }
+  input[type=range] { width:100%; accent-color:#a5e7e6; cursor:pointer; height:20px; margin:0; }
+  .colorrow { display:flex; align-items:center; gap:12px; }
+  input[type=color] { appearance:none; -webkit-appearance:none; background:none; border:none; width:52px; height:39px; cursor:pointer; padding:0; } input[type=color]::-webkit-color-swatch-wrapper{padding:0;} input[type=color]::-webkit-color-swatch { border:1px solid #ffffff55; border-radius:9px; } input[type=color]::-moz-color-swatch{border:1px solid #ffffff55;border-radius:9px;}
+  #hex { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:12px; color:#acc3cf; }
+  .swatches { display:flex; gap:8px; margin-top:11px; }
+  .swatch { width:29px; height:29px; border-radius:50%; border:2px solid rgba(255,255,255,.18); cursor:pointer; transition:transform .15s; }
+  .swatch:hover { transform:scale(1.15); } .swatch.active { outline:1px solid #c8f7f6; outline-offset:3px; }
+  .buttons { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding-top:6px; }
+  .btn { color:#ecf8fa; border:1px solid #ffffff36; border-radius:10px; background:#ffffff13; padding:11px 9px; cursor:pointer; font:inherit; font-size:12px; } .btn:hover { background:#ffffff2a; } .btn.primary { background:#a4d9d8; color:#10212b; border:0; font-weight:650; }
+  .hint { margin:14px 0 0; color:#9ab0b9; font-size:10px; line-height:1.5; }
+  #open { position:fixed; top:18px; right:18px; z-index:9; padding:10px 13px; background:#09141a99; border:1px solid #ffffff38; color:#e3f4fa; border-radius:10px; font-size:12px; cursor:pointer; opacity:0; pointer-events:none; transition:opacity .2s; backdrop-filter:blur(8px); }
+  #open.visible {opacity:1;pointer-events:auto;} #open.silent { opacity:0; }
+  #status {position:fixed;inset:0;display:none;place-items:center;z-index:20;background:#071921;color:#ddeff4;text-align:center;padding:24px;font:14px system-ui;} #status.show{display:grid;}
+  @media(max-width:600px){ #ui {width:min(260px, calc(100vw - 28px));max-height:calc(100dvh - 28px);top:14px;right:14px;} #open{top:14px;right:14px;} }
+
+#modeFields label{display:flex;justify-content:space-between;font-size:12px;margin:14px 0 8px}#modeFields p{font-size:11px;color:#9ab0b9}#modeFields input{accent-color:#a5e7e6;width:100%}#modeFields input[type=checkbox]{width:auto}#modeFields .seg{display:flex;gap:6px;margin:12px 0}#modeFields button{color:#ecf8fa;background:#ffffff13;border:1px solid #ffffff36;border-radius:8px;padding:9px;cursor:pointer}#modeFields .chk{justify-content:flex-start;gap:8px}#modeFields a{color:#a5e7e6}#modeFields [hidden]{display:none!important}

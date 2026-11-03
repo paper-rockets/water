@@ -1,0 +1,1611 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><link rel="stylesheet" href="water-ui.css">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Duck pond</title>
+<meta name="description" content="Real-time water caustics with three.js in one small HTML file: a random sea, a rubber duck making ripples, turbulence, sun or lamp. Falls back to the CPU without WebGL.">
+
+<script type="importmap">{ "imports": { "three": "./vendor/three186/build/three.module.js",
+  "three/addons/": "./vendor/three186/addons/" } }</script>
+<script src="scene-controls.js"></script><script src="water-materials.js"></script>
+<script src="splash-fluid.js" defer></script><script src="../water-audio.js" defer></script><script src="duck-drop.js" defer></script><script src="motion-water.js" defer></script><script src="kid-menu.js" defer></script></head>
+<body>
+<canvas id="view" role="img" aria-label="A glass tank of water on a tiled floor; light through the moving surface draws caustics on the tank floor"></canvas>
+<div id="ui"><div class="top"><div><h1>WATER SURFACE</h1><div class="muted">Touch to make ripples</div></div><button class="close" id="close" aria-label="Hide controls">×</button></div><div id="modeFields"><label for="causticMaterial">Water material</label><select id="causticMaterial"><option value="clear">Clear water</option></select><label for="causticCoating">Material coating</label><input id="causticCoating" type="range" min="0" max="100" value="70">
+
+  <div class="seg" role="group" aria-label="Light source"><button id="sun" aria-pressed="true">Sun</button><button id="lamp" aria-pressed="false">Lamp</button></div>
+  <div id="sunCtl"><label for="elev">Sun height <span id="elevOut"></span></label><input id="elev" type="range" min="5" max="85" value="50">
+    <label for="az">Sun direction <span id="azOut"></span></label><input id="az" type="range" min="0" max="360" value="225"></div>
+  <div id="lampCtl" hidden><label for="lampH">Lamp height <span id="lampHOut"></span></label><input id="lampH" type="range" min="1.8" max="3.4" step="0.05" value="2.3">
+    <label for="lampX">Lamp position <span id="lampXOut"></span></label><input id="lampX" type="range" min="-1.5" max="1.5" step="0.05" value="0.5"></div>
+  <label for="waves">Waves <span id="wavesOut"></span></label><input id="waves" type="range" min="0" max="2" step="0.01" value="1">
+  <label for="turb">Turbulence <span id="turbOut"></span></label><input id="turb" type="range" min="0" max="1" step="0.01" value="0.5">
+  <label for="duck">Rubber ducks <output id="duckOut"></output></label><select id="duck"><option value="0">None</option><option value="1">1 duck</option><option value="5">5 ducks</option></select>
+  <label for="boxTiles" id="boxTilesLabel" hidden>Floor tiles <output></output></label><input id="boxTiles" type="range" min="5" max="30" value="16" hidden>
+  <label for="tankFill" id="tankFillLabel" hidden>How much water <output id="tankFillOut"></output></label><input id="tankFill" type="range" min="50" max="150" value="100" hidden>
+  <label class="chk" id="outsideRow"><input id="outside" type="checkbox"> See the tank from outside</label>
+  <label class="chk" id="tankBgRow" hidden><input id="tankBg" type="checkbox"> Tank background (tiles)</label>
+  <div id="stats"></div><p>Caustic Lite by <a href="https://github.com/ScottieFox/caustic-volume">ScottieFox</a> · <a href="LICENSE">MIT license</a></p>
+  <p>Tap or drag to make ripples · <kbd>R</kbd> random ripple · <kbd>D</kbd> more ducks · <kbd>L</kbd> sun or lamp · <kbd>Space</kbd> pause · <kbd>H</kbd> hide</p>
+</div></div><button id="open" aria-label="Open water controls">⚙ Controls</button>
+<script type="module">
+// =====================================================================================
+// CAUSTIC//LITE â€” light through moving water, focused into caustics on a tank floor. Built on
+// three.js: a random sea and a rubber duck's ripples (a GPU ripple simulation) move the surface,
+// a caustics texture is redrawn every frame, and small shaders follow each ray through the water.
+// Without WebGL 2 (or offline, when three.js can't load) a small CPU renderer draws the same scene.
+// =====================================================================================
+
+// ---------------------------------------------------------------- the scene (metres)
+const VIEW_AREA=1.8;
+// The tank is sized to the screen: on a tall phone it is narrow, so the ripple, surface and light grids spend their
+// cells on what can be seen instead of on a wide tank that is mostly off screen. A change between portrait and
+// landscape reloads the page.
+const SCREEN_AR = Math.max(0.35, Math.min(3, innerWidth / Math.max(1, innerHeight)));
+// Fish tank (?tank=1): the screen is the tank. Its front glass fills the screen exactly, so the screen's edges are the
+// walls the water splashes against. 2 m tall, as wide as the screen's shape, 60 cm deep, with a tiled back wall.
+const TANK_MODE = false;   // this page is only the water box
+// Water box (?motion=1 without ?tank): seen from above, the screen is the box of water lying on a table. Its water is a shallow-water
+// simulation that keeps its volume (see ShallowWater): tip the device any way and the water runs that way, shake it and it sloshes all over.
+const SWE_ON = true;
+const OUTSIDE = false; // Water box is always the immersive Top view.
+const TZ = TANK_MODE ? 0.3 : SWE_ON ? 1.2 : 1.1*VIEW_AREA, TX = TANK_MODE ? SCREEN_AR : SWE_ON ? Math.min(3.2, Math.max(0.55, 1.2 * SCREEN_AR)) : Math.min(1.8*VIEW_AREA, Math.max(1.5, 1.3 * TZ * SCREEN_AR)), TOP = TANK_MODE ? 2.0 : 1.55;   // tank half-width (x), half-depth (z), rim height
+addEventListener('resize', () => { if ((innerWidth >= innerHeight) !== (SCREEN_AR >= 1)) location.reload(); });
+const LEVEL = TANK_MODE ? 0.45 * TOP : SWE_ON ? 0.7 : 1.2, IOR = 1.333;         // water level, refractive index of water
+const ABSORB = TANK_MODE ? [2.4, 0.4, 0.22] : SWE_ON ? [1.5, 0.25, 0.14] : [0.6, 0.1, 0.055];       // absorption per metre: red goes first, so water looks blue-green
+const TARGET = [0, 0.55, 0], FOV = 42;
+
+// ---------------------------------------------------------------- the water's own motion (both renderers)
+// A random sea: 24 waves from 1.2 m down to 12 cm long, heading every which way (a golden-angle
+// spread, so waves of neighbouring lengths never run side by side). Together they make a short-
+// crested, random surface, and its caustics form a net of bright cells instead of stripes. Each wave's
+// crests wander, and its height rises and falls on its own slow cycle, so the net keeps reshaping.
+// Waves scales them all; Turbulence adds the short ones and livens the cycles. On top of that, a
+// ripple simulation carries the rubber duck's wake, clicks and gusts across the tank and back off the glass.
+const NW = 24, WAVES = [];
+{
+  let s = 5;
+  const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < NW; i++) {
+    const len = .62 * 0.1 ** (i / (NW - 1)), k = 2 * Math.PI / len, dir = i * 2.39996 + (rnd() - 0.5) * 0.9;
+    WAVES.push({ k, kx: k * Math.cos(dir), kz: k * Math.sin(dir), w: Math.sqrt(9.81 * k + 0.074 * k ** 3), ph: rnd() * 6.283,
+      a: 0.32 * Math.min(1, (0.55 / len) ** 2) / (k * k) * (0.6 + 0.8 * rnd()), short: len < 0.3,   // the same curvature (a k^2) for most
+      f1: 0.05 + 0.22 * rnd(), f2: 0.09 + 0.3 * rnd(), p1: rnd() * 6.283, p2: rnd() * 6.283 });
+  }
+}
+const waveUniform = new Float32Array(NW * 4), ampUniform = new Float32Array(NW);
+WAVES.forEach((W, i) => waveUniform.set([W.kx, W.kz, W.w, W.ph], i * 4));
+function waveHeights(t, waves, turb) {   // each wave's height now (m)
+  const swing = 0.35 + 0.55 * turb;
+  WAVES.forEach((W, i) => { ampUniform[i] = W.a * Math.max(0.1, 1 + swing * (0.6 * Math.sin(W.f1 * t + W.p1) + 0.4 * Math.sin(W.f2 * t + W.p2)))
+    * waves * (W.short ? 0.3 + 1.4 * turb : 1); });
+}
+// the sea at (x, z), as the GPU computes it -> o: height, slope x, slope z, and the water's horizontal velocity
+let SWE = null; const swe5 = [0, 0, 0, 0, 0], SWE_PUSH = [0, 0, 9.81];   // ...; the box's eased push on the water (x, z) and how hard it presses on the floor   // the fish tank's shallow water (made below), and a place to read it into
+const TILT = [0, 0], TILT_H = TANK_MODE ? 1.0 : 0.45;   // Tilt & play: how far the water leans with the phone (slope in x and z), and the most it can rise or fall (m)
+function waveAt(x, z, o) {
+  let h = 0, gx = 0, gz = 0, u = 0, v = 0;
+  for (let i = 0; i < NW; i++) {   // each wave's crests are bent by a slower wave running along them
+    const W = WAVES[i], k = W.k, kb = 0.37 * k, sx = -W.kz / k, sz = W.kx / k;
+    const pb = kb * (sx * x + sz * z) + 0.9 * state.t + 7.1 * i, ph = W.kx * x + W.kz * z - W.w * state.t + W.ph + 1.6 * Math.sin(pb);
+    const a = ampUniform[i], s = a * Math.sin(ph), cp = a * Math.cos(ph), b = 1.6 * kb * Math.cos(pb);
+    h += s; gx += cp * (W.kx + b * sx); gz += cp * (W.kz + b * sz); u += s * W.w * W.kx / k; v += s * W.w * W.kz / k;
+  }
+  const th = Math.tanh((TILT[0] * x + TILT[1] * z) / TILT_H);
+  o[0] = h + TILT_H * th; o[1] = gx + TILT[0] * (1 - th * th); o[2] = gz + TILT[1] * (1 - th * th); o[3] = u; o[4] = v;
+  if (SWE) { SWE.at(x, z, swe5); o[0] += swe5[0]; o[1] += swe5[1]; o[2] += swe5[2]; o[3] += swe5[3]; o[4] += swe5[4]; }
+}
+
+const $ = (id) => document.getElementById(id);
+const state = { t: 0, paused: false, lamp: false, scale: 1, waves: 1, turb: 0.5 };
+const drops = [];   // splashes waiting for the ripple simulation: x, z, radius (m), height (mm)
+let splashAcc = 0;
+function addRipple(x, z, h = 6, r = 0.06) { drops.push([x, z, r, h]); }
+function turbulence(dt) {   // gusts ruffle the water here and there, more of them with more turbulence
+  for (splashAcc += dt * 5 * state.turb; splashAcc >= 1; splashAcc -= 1)
+    addRipple((Math.random() * 2 - 1) * TX * 0.95, (Math.random() * 2 - 1) * TZ * 0.95, (Math.random() < 0.5 ? -1 : 1) * (0.4 + Math.random()) * state.turb, 0.03 + 0.05 * Math.random());
+}
+
+// ---------------------------------------------------------------- the rubber duck
+// The sandbox's duck. In duck units (body length 1; x forward, y up, the flat base at the origin),
+// ellipsoids and a sphere make the body, tail, chest, head and wings, blended by a smooth minimum so
+// they flow into each other; a flattened beak has a mouth line cut in; then two eyes. These are distance
+// functions (negative inside): the GPU renderer turns them into a mesh once, the CPU one traces them.
+// The duck drifts on a wandering breeze, sways with the waves, bobs and slowly turns; its hull pushes
+// the water aside, and the ripple simulation spreads that into a wake and rings (see hull()).
+const DS = TANK_MODE ? 0.22 : SWE_ON ? 0.15 : 0.28, DRAFT = 0.125 * DS, FOOT = [0.43 * DS, 0.32 * DS];   // metres per duck unit; how deep it floats; its waterline (half-axes, m)
+const ell = (x, y, z, a, b, c) => { x /= a; y /= b; z /= c; const k0 = Math.sqrt(x * x + y * y + z * z), k1 = Math.sqrt(x * x / (a * a) + y * y / (b * b) + z * z / (c * c)); return k0 * (k0 - 1) / k1; };
+const smin = (a, b, k) => { const h = Math.min(Math.max(0.5 + 0.5 * (b - a) / k, 0), 1); return b + (a - b) * h - k * h * (1 - h); };
+const box = (x, y, z, a, b, c, r) => { const qx = Math.abs(x) - a + r, qy = Math.abs(y) - b + r, qz = Math.abs(z) - c + r, ux = Math.max(qx, 0), uy = Math.max(qy, 0), uz = Math.max(qz, 0);
+  return Math.sqrt(ux * ux + uy * uy + uz * uz) + Math.min(Math.max(qx, qy, qz), 0) - r; };
+const TIP = [Math.cos(0.55), Math.sin(0.55), Math.cos(0.25), Math.sin(0.25), Math.cos(0.1), -Math.sin(0.1)];   // how the tail, wings and beak are tipped
+function duckBody(x, y, z) {   // as duckShape() in the shaders
+  const tx = x + 0.4, ty = y - 0.46, wx = x + 0.04, wy = y - 0.37, hx = x - 0.25, hy = y - 0.8;
+  let d = ell(x, y - 0.28, z, 0.5, 0.3, 0.37);                                                         // body
+  d = smin(d, ell(tx * TIP[0] + ty * TIP[1], ty * TIP[0] - tx * TIP[1], z, 0.2, 0.13, 0.15), 0.12);    // tail
+  d = smin(d, ell(x - 0.22, y - 0.3, z, 0.3, 0.26, 0.31), 0.1);                                        // chest
+  d = smin(d, Math.sqrt(hx * hx + hy * hy + z * z) - 0.25, 0.14);                                      // head
+  d = smin(d, ell(wx * TIP[2] + wy * TIP[3], wy * TIP[2] - wx * TIP[3], Math.abs(z) - 0.29, 0.27, 0.12, 0.08), 0.05);   // wings
+  return Math.max(d, box(x, y - 0.6, z, 1.2, 0.58, 1.2, 0.03));                                        // flat base
+}
+function duckBeak(x, y, z) {
+  const bx = x - 0.53, by = y - 0.73;
+  return Math.max(ell(bx * TIP[4] + by * TIP[5], by * TIP[4] - bx * TIP[5], z, 0.18, 0.065, 0.14), -box(x - 0.64, y - 0.725, z, 0.12, 0.007, 0.2, 0));
+}
+const EYE = [0.41, 0.9, 0.15, 0.055];   // eye centre (and its mirror image across z), radius
+const pupil = (x, y, z) => Math.hypot(x - 0.44, y - 0.906, Math.abs(z) - 0.172) < 0.032;   // a black disc, looking forward and out
+const newDuck = (x, z, head) => ({ on: false, x, z, vx: 0, vz: 0, head, spin: 0, y: 0, vy: 0, pitch: 0, roll: 0, breeze: head, draft: DRAFT });
+const DUCK = newDuck(0.55, 0.25, 2.5);   // the first duck; both renderers can draw the whole flock
+const MAX_DUCKS=50;
+const DUCKS=[DUCK,...Array.from({length:MAX_DUCKS-1},()=>newDuck(0,0,Math.random()*Math.PI*2))];   // up to fifty; DUCKS[i].on says if it is in the water
+const PUSH = 420;   // how much of the water the hull moves shows up as ripples (mm per m)
+const dw = new Float32Array(5);
+const visibleBounds={x:TX-.3,z:TZ-.3};
+function constrainDuck(D=DUCK){
+  const x=Math.max(-visibleBounds.x,Math.min(visibleBounds.x,D.x)),z=Math.max(-visibleBounds.z,Math.min(visibleBounds.z,D.z));
+  if(x!==D.x)D.vx=-D.vx*.3;if(z!==D.z)D.vz=-D.vz*.3;
+  D.x=x;D.z=z;
+}
+function setDuckCount(n){
+  n=Math.max(0,Math.min(MAX_DUCKS,Math.floor(n)));    // 0 to 50 ducks; a duck that joins starts somewhere in the open water
+  for(let i=0;i<DUCKS.length;i++){const D=DUCKS[i],on=i<n;
+    if(on&&!D.on&&i>0){D.x=(Math.random()*2-1)*visibleBounds.x*.8;D.z=(Math.random()*2-1)*visibleBounds.z*.8;D.vx=D.vz=0;D.y=D.vy=0;}
+    D.on=on;if(!on){D.falling=false;D.landing=0;}}
+  const sel=document.getElementById('duck');if(sel)sel.value=String(n);
+  try{localStorage.setItem(TANK_MODE?'water.tankDucks':SWE_ON?'water.boxDucks':'water.lightDucks',String(n));}catch{}
+  dispatchEvent(new CustomEvent('water-duck-count',{detail:n}));
+}
+$('duck').replaceChildren(...Array.from({length:51},(_,i)=>{const o=document.createElement('option');o.value=i;o.textContent=i+' ducks';return o;}));
+const duckCount=()=>DUCKS.filter(D=>D.on).length;
+function duckRenderY(D){if(!D.falling)return D.y;const surface=D.dropWater||0;return surface+R.airHeight(Math.max(0,D.y-surface));}
+function keepAfloat(D){if(!D.surface||!D.on||D.falling||D.landing>0)return;const y=Math.max(DRAFT-LEVEL,D.surface[0]),travel=DRAFT*.35;D.y=Math.max(y-travel,Math.min(y+travel,D.y));D.draft=Math.max(.004,Math.min(DRAFT*2.2,DRAFT+y-D.y));}
+
+const splashDrops=[],splashCrowns=[],splashFluid=new SplashFluid();let impactCount=0;
+function dropDuck(){
+  const n=duckCount();if(n>=MAX_DUCKS||state.paused)return false;
+  setDuckCount(n+1);const D=DUCKS[n];let best=-1,point=[0,0];
+  for(let i=0;i<24;i++){const x=(Math.random()*2-1)*visibleBounds.x*.72,z=(Math.random()*2-1)*visibleBounds.z*.72;let gap=10;for(let j=0;j<n;j++)gap=Math.min(gap,Math.hypot(x-DUCKS[j].x,z-DUCKS[j].z));if(gap>best){best=gap;point=[x,z];}}
+  D.surface=null;waveAt(point[0],point[1],dw);D.dropHeight=R.dropHeight();D.dropWater=dw[0];D.y=dw[0]+D.dropHeight;D.vy=0;
+  const duration=Math.sqrt(2*D.dropHeight/9.81),angle=Math.random()*Math.PI*2;
+  D.x=Math.max(-visibleBounds.x*.88,Math.min(visibleBounds.x*.88,point[0]-Math.cos(angle)*(.28+Math.random()*.28)));
+  D.z=Math.max(-visibleBounds.z*.88,Math.min(visibleBounds.z*.88,point[1]-Math.sin(angle)*(.28+Math.random()*.28)));
+  D.vx=(point[0]-D.x)/duration;D.vz=(point[1]-D.z)/duration;
+  D.airYaw=(Math.random()-.5)*2.4;D.airPitch=(Math.random()-.5)*Math.PI*2;D.airRoll=(Math.random()-.5)*Math.PI*2;D.airPitchV=(Math.random()-.5)*3;D.airRollV=(Math.random()-.5)*3;
+  D.head=Math.atan2(D.vz,D.vx)+(Math.random()-.5)*.8;D.pitch=D.airPitch;D.roll=D.airRoll;
+  D.draft=0;D.falling=true;D.landing=0;D.waterY=dw[0];
+  dispatchEvent(new Event('water-duck-dropped'));return true;
+}
+function duckImpact(D,speed){
+  impactCount++;addRipple(D.x,D.z,-7,.09);
+  const area=SWE.dx*SWE.dz,centerX=Math.floor((D.x+TX)/SWE.dx),centerZ=Math.floor((D.z+TZ)/SWE.dz),cells=[];
+  for(let z=-1;z<=1;z++)for(let x=-1;x<=1;x++){const i=Math.max(0,Math.min(SWE.nx-1,centerX+x)),j=Math.max(0,Math.min(SWE.nz-1,centerZ+z));if(!cells.includes(j*SWE.nx+i))cells.push(j*SWE.nx+i);}
+  const volume=Math.min(.00035*(DS/.2)**3,...cells.map(k=>SWE.h[k]*area*cells.length*.15));
+  for(const k of cells)SWE.h[k]-=volume/(area*cells.length);
+  const returnWater=p=>{const i=Math.max(0,Math.min(SWE.nx-1,Math.floor((p.x+TX)/SWE.dx))),j=Math.max(0,Math.min(SWE.nz-1,Math.floor((p.z+TZ)/SWE.dz)));SWE.h[j*SWE.nx+i]+=p.volume/area;};
+  returnWater.parcelVolume=volume/144;
+  splashFluid.spawn(D.x,LEVEL+D.y,D.z,D.entryVx||0,D.entryVz||0,speed,D.head,returnWater);
+  dispatchEvent(new CustomEvent('water-duck-impact',{detail:{x:D.x,z:D.z,speed}}));
+}
+function stepSplash(dt){splashFluid.step(dt,(x,z)=>{let nearest=null,best=.5;for(const d of DUCKS){if(!d.on||!d.surface)continue;const distance=Math.hypot(x-d.x,z-d.z);if(distance<best){nearest=d;best=distance;}}if(nearest)return LEVEL+nearest.surface[0]+Math.max(-.08,Math.min(.08,nearest.surface[1]*(x-nearest.x)+nearest.surface[2]*(z-nearest.z)));waveAt(x,z,dw);return LEVEL+dw[0];},p=>addRipple(p.x,p.z,.25,.018));splashFluid.changed=splashFluid.mesh();}
+function separateDucks(){   // ducks do not float through each other
+  const min=0.95*DS;
+  for(let i=0;i<DUCKS.length;i++)for(let j=i+1;j<DUCKS.length;j++){
+    const a=DUCKS[i],b=DUCKS[j];if(!a.on||!b.on||a.falling||b.falling)continue;
+    const dx=b.x-a.x,dz=b.z-a.z,d=Math.hypot(dx,dz)||1e-4;if(d>=min)continue;
+    const k=(min-d)/2/d;a.x-=dx*k;a.z-=dz*k;b.x+=dx*k;b.z+=dz*k;
+    const rv=(b.vx-a.vx)*dx/d+(b.vz-a.vz)*dz/d;if(rv<0){a.vx+=dx/d*rv*.5;a.vz+=dz/d*rv*.5;b.vx-=dx/d*rv*.5;b.vz-=dz/d*rv*.5;}
+  }
+}
+function duckStep(h, turb, D = DUCK) {   // move a duck on by h seconds -> its hull before and after: x, z, heading, depth
+  const before = [D.x, D.z, D.head, D.on ? D.draft : 0];
+  waveAt(D.x, D.z, dw);
+  if(D.falling){
+    D.vy-=9.81*h;D.y+=D.vy*h;D.x+=D.vx*h;D.z+=D.vz*h;D.draft=0;
+    D.head+=D.airYaw*h;D.roll+=D.airRollV*h;D.pitch+=D.airPitchV*h;
+    const water=D.surface?.[0]??dw[0];
+    if(D.y<=water){const speed=-D.vy;D.y=water;D.falling=false;D.landing=.95;D.entryTime=0;D.entrySpeed=speed;D.entryY=water;D.entryVx=D.vx;D.entryVz=D.vz;D.vx*=.25;D.vz*=.25;D.vy=-Math.min(1.8,speed*.28);duckImpact(D,speed);}
+    return [before,[D.x,D.z,D.head,D.draft]];
+  }
+  D.landing=Math.max(0,(D.landing||0)-h);
+  if(D.landing>0){D.entryTime+=h;}
+
+  D.breeze += (Math.random() - 0.5) * Math.sqrt(h) * (0.6 + 2 * turb);
+  const sp = 0.03 + 0.12 * turb, wall = (d) => Math.max(0, 0.5 - d) * 0.8;   // the glass pushes it back
+  // in the water box a duck is light: it goes where the water goes, quickly, and slides down the slope of the water toward the deep side
+  if (SWE_ON) {   // a duck is light: it is carried along by the water under it, and feels the same push as the water (the box's push, less the slope of the water)
+    SWE.at(D.x, D.z, swe5);
+    const grip = Math.min(1, 8 * h), [px, pz, g] = SWE_PUSH;
+    const sx=D.surface?D.surface[1]-swe5[1]:0,sz=D.surface?D.surface[2]-swe5[2]:0;
+    D.rippleVx=(D.rippleVx||0)*Math.exp(-h*2)+Math.max(-3,Math.min(3,-g*sx))*h;
+    D.rippleVz=(D.rippleVz||0)*Math.exp(-h*2)+Math.max(-3,Math.min(3,-g*sz))*h;
+    D.vx += (swe5[3]+D.rippleVx - D.vx) * grip + 0.5 * (px - g * swe5[1]) * h;
+    D.vz += (swe5[4]+D.rippleVz - D.vz) * grip + 0.5 * (pz - g * swe5[2]) * h;
+    if (swe5[0] + LEVEL < 2 * DRAFT) {   // left on a wet floor or dry tiles: it is washed toward the deepest water nearby
+      let bx = 0, bz = 0, best = swe5[0];
+      for (let a = 0; a < 8; a++) { const cx = Math.cos(a * Math.PI / 4), cz = Math.sin(a * Math.PI / 4); SWE.at(D.x + 0.3 * cx, D.z + 0.3 * cz, swe5); if (swe5[0] > best) { best = swe5[0]; bx = cx; bz = cz; } }
+      D.vx += 6 * bx * h; D.vz += 6 * bz * h;
+    }
+    D.vx += (wall(TX + D.x) - wall(TX - D.x)) * h; D.vz += (wall(TZ + D.z) - wall(TZ - D.z)) * h;
+  } else {
+  const ride = 0.9, grip = 1.5;
+  D.vx += (Math.cos(D.breeze) * sp + ride * dw[3] + wall(TX + D.x) - wall(TX - D.x) - D.vx) * Math.min(1, grip * h);
+  D.vz += (Math.sin(D.breeze) * sp + ride * dw[4] + wall(TZ + D.z) - wall(TZ - D.z) - D.vz) * Math.min(1, grip * h);
+  }
+  D.x = Math.min(Math.max(D.x + D.vx * h, 0.24 - TX), TX - 0.24); D.z = Math.min(Math.max(D.z + D.vz * h, 0.24 - TZ), TZ - 0.24);
+  constrainDuck(D);
+  // it turns to face the way it drifts, with a slow random spin
+  const want = Math.atan2(D.vz, D.vx);
+  D.spin = D.spin * Math.exp(-h*3) + (SWE_ON?0:(Math.random() - 0.5) * Math.sqrt(h) * (0.4 + 1.5 * turb));
+  D.head += (Math.atan2(Math.sin(want - D.head), Math.cos(want - D.head)) * Math.min(1, 6 * Math.hypot(D.vx, D.vz)) * 0.7 + D.spin) * h;
+  // Buoyancy follows the actual rendered surface averaged across the hull.
+  // The previous frame's compact surface readback includes touch ripples and wakes.
+  if(D.surface){dw[0]=D.surface[0];dw[1]=D.surface[1];dw[2]=D.surface[2];}
+  const target=Math.max(dw[0],DRAFT-LEVEL),previous=D.waterY??target;
+  const waterV=Math.max(-.7,Math.min(.7,(target-previous)/Math.max(h,.001)));
+  D.waterY=target;
+  D.vy+=(100*(target-D.y)+20*(waterV-D.vy))*h;
+  D.vy=Math.max(D.landing>0?-1.8:-1.2,Math.min(1.2,D.vy));D.y+=D.vy*h;
+  const travel=D.landing>0?DS*.48*Math.exp(-D.entryTime*3):DRAFT*.35;D.y=Math.max(target-travel,Math.min(target+travel,D.y));
+  D.draft=Math.max(.004,Math.min(DRAFT*2.2,DRAFT+target-D.y));
+  const c=Math.cos(D.head),s=Math.sin(D.head),k=1-Math.exp(-h*(D.landing>0?3.5:9));
+  D.pitch+=Math.atan2(Math.sin(Math.atan(dw[1]*c+dw[2]*s)-D.pitch),Math.cos(Math.atan(dw[1]*c+dw[2]*s)-D.pitch))*k;
+  D.roll+=Math.atan2(Math.sin(-Math.atan(dw[2]*c-dw[1]*s)-D.roll),Math.cos(-Math.atan(dw[2]*c-dw[1]*s)-D.roll))*k;
+  const relative=Math.hypot(D.vx-dw[3],D.vz-dw[4]),impact=Math.max(0,waterV-D.vy);
+  D.wakeTime=(D.wakeTime||0)+h;
+  if(D.on&&D.wakeTime>1/9&&(relative>.025||impact>.12)){
+    D.wakeTime=0;const strength=Math.min(5,.5+relative*4+impact*3);
+    for(const side of [-1,1])addRipple(D.x-c*FOOT[0]*.5-s*FOOT[1]*side,D.z-s*FOOT[0]*.5+c*FOOT[1]*side,strength,.028);
+  }
+  return [before, [D.x, D.z, D.head, D.on ? D.draft : 0]];
+}
+// how far below the water the hull reaches at (x, z) (m), for a hull state d: x, z, heading, depth
+function hull(x, z, d) {
+  const qx = x - d[0], qz = z - d[1], c = Math.cos(d[2]), s = Math.sin(d[2]);
+  const u = (qx * c + qz * s) / FOOT[0], w = (qz * c - qx * s) / FOOT[1], r = Math.max(0, 1 - u * u - w * w); return d[3] * r * r;
+}
+function poke(x, z) {   // a click on the water: a ripple, and a shove for the duck if it's close
+  addRipple(x, z);dispatchEvent(new CustomEvent('water-touch-sound',{detail:{x,z}}));
+  for (const D of DUCKS) {
+    const dx = D.x - x, dz = D.z - z, d = Math.hypot(dx, dz);
+    if (D.on && d < 0.6) { const k = 0.35 * (1 - d / 0.6) / Math.max(d, 0.05); D.vx += dx * k; D.vz += dz * k; D.vy -= 0.08;for(const side of [-1,1])addRipple(D.x+Math.cos(D.head+side*1.2)*FOOT[0],D.z+Math.sin(D.head+side*1.2)*FOOT[1],4,.03); }
+  }
+}
+
+// light: the sun (a direction) or the lamp (a point above the tank), and what it does to the sky
+function light() {
+  if (state.lamp) return { lamp: true, pos: [+$('lampX').value, +$('lampH').value, 0.1], col: [6, 6 * 0.8, 6 * 0.58], amb: [0.012, 0.016, 0.028],
+    glow: [0.004, 0.012, 0.014], day: 0.05 };
+  const el = +$('elev').value * Math.PI / 180, az = +$('az').value * Math.PI / 180;
+  const warm = Math.min(1, el / 0.5), day = 0.35 + 0.65 * Math.min(1, el / 0.6), I = 3.2, glow = 0.35 * I * Math.sin(el) + 0.4 * day;
+  return { lamp: false, pos: [Math.cos(el) * Math.cos(az), Math.sin(el), Math.cos(el) * Math.sin(az)], col: [I, I * (0.62 + 0.36 * warm), I * (0.38 + 0.56 * warm)],
+    amb: [0.3 * day, 0.42 * day, 0.62 * day], glow: [0.012 * glow, 0.07 * glow, 0.085 * glow], day };
+}
+
+// ================================================================= GPU: three.js
+const f = (v) => (Number.isInteger(v) ? v.toFixed(1) : String(v));   // number -> GLSL float
+const G=window.WATER_GRAPHICS;
+// ---------------------------------------------------------------- the fish tank's water
+// Shallow water in a box (a height for every cell of the floor, a flow across every cell wall): the water keeps its volume, runs to
+// whichever side of the box is down (forward, back, left or right), piles up there, leaves the high side of the floor dry, sloshes
+// back, and is thrown about by shaking. The box's sideways pushes are the device's own readings (gravity and shaking together).
+// The ripple simulation and the sea's small waves ride on top of it.
+class ShallowWater {
+  constructor(depth) {
+    const cells = Math.min(6000, Math.max(2500, G.simulation * G.simulation * 0.068)), d = Math.sqrt(4 * TX * TZ / cells);   // square cells: 2500 on Low (tablet), more on Medium and High
+    this.nx = Math.max(8, Math.round(2 * TX / d)); this.nz = Math.max(6, Math.round(2 * TZ / d));
+    this.dx = 2 * TX / this.nx; this.dz = 2 * TZ / this.nz;
+    const n = this.nx * this.nz;
+    this.h = new Float32Array(n); this.u = new Float32Array((this.nx + 1) * this.nz); this.w = new Float32Array(this.nx * (this.nz + 1));
+    this.qu = new Float32Array(this.u.length); this.qw = new Float32Array(this.w.length); this.scale = new Float32Array(n);
+    this.fill(depth);
+  }
+  fill(depth) { this.h.fill(depth); this.u.fill(0); this.w.fill(0); this.volume = depth * this.h.length; }
+  step(dt, ax, az, g) {   // ax, az: the box's sideways pushes (m/s^2); g: how hard the water presses on the floor
+    const h = this.h;
+    dt = Math.min(dt, 1 / 20);   // a slow frame runs a little slower rather than taking steps too long to stay smooth
+    let top = 0.2; for (let k = 0; k < h.length; k++) if (h[k] > top) top = h[k];   // every cell: a tall pile missed here makes the steps too long and the water spiky
+    const c = Math.sqrt(g * top) + 1.5, n = Math.min(40, Math.max(1, Math.ceil(dt * c / (0.4 * Math.min(this.dx, this.dz))))), s = dt / n;
+    for (let it = 0; it < n; it++) this.sub(s, ax, az, g);
+    let v = 0; for (let k = 0; k < h.length; k++) v += h[k];
+    if (v > 1e-6) { const f = this.volume / v; for (let k = 0; k < h.length; k++) h[k] *= f; }   // nothing is lost or made
+    // seen from outside, the water stays inside the glass: no cell rises past the rim, and what would have gone over goes back into the rest
+    // of the water (only there: from above, a steady push would keep sharing the pile back over the floor, and the water would not run down)
+    if (!OUTSIDE) return;
+    const cap = 0.9 * TOP; let over = 0, room = 0;
+    for (let k = 0; k < h.length; k++) if (h[k] > cap) { over += h[k] - cap; h[k] = cap; } else if (h[k] > 1e-3) room += cap - h[k];
+    if (over > 0 && room > 0) { const f = Math.min(1, over / room); for (let k = 0; k < h.length; k++) if (h[k] < cap && h[k] > 1e-3) h[k] += (cap - h[k]) * f; }
+    for (let k = 0; k < this.u.length; k++) { const j = (k / (this.nx + 1)) | 0, i = k - j * (this.nx + 1); if (i > 0 && i < this.nx && (h[j * this.nx + i - 1] >= cap || h[j * this.nx + i] >= cap)) this.u[k] *= 0.9; }   // water pressed against the lid slows
+    for (let k = this.nx; k < this.w.length - this.nx; k++) if (h[k - this.nx] >= cap || h[k] >= cap) this.w[k] *= 0.9;
+  }
+  sub(dt, ax, az, g) {
+    const { nx, nz, dx, dz, h, u, w, qu, qw, scale } = this, eps = 1e-3, vx = 0.9 * dx / dt, vz = 0.9 * dz / dt, damp = 1 - 1.8 * dt;   // it settles in one or two sloshes
+    for (let j = 0; j < nz; j++) for (let i = 1; i < nx; i++) {   // the cell walls across x: pushed by the box and by the water's own slope
+      const k = j * (nx + 1) + i, hl = h[j * nx + i - 1], hr = h[j * nx + i];
+      let v = (u[k] + dt * (ax - g * (hr - hl) / dx)) * damp;
+      if ((v > 0 ? hl : hr) < eps) v = 0;
+      u[k] = v > vx ? vx : v < -vx ? -vx : v;
+    }
+    for (let j = 1; j < nz; j++) for (let i = 0; i < nx; i++) {   // and across z
+      const k = j * nx + i, hd = h[(j - 1) * nx + i], hu = h[k];
+      let v = (w[k] + dt * (az - g * (hu - hd) / dz)) * damp;
+      if ((v > 0 ? hd : hu) < eps) v = 0;
+      w[k] = v > vz ? vz : v < -vz ? -vz : v;
+    }
+    const mix = Math.min(0.2, 6 * dt);   // a little friction between neighbouring streams of water: it smooths away cell-sized spikes, like real water's thickness
+    for (let j = 0; j < nz; j++) for (let i = 1; i < nx; i++) { const k = j * (nx + 1) + i; qu[k] = u[k]; }
+    for (let j = 0; j < nz; j++) for (let i = 1; i < nx; i++) {
+      const k = j * (nx + 1) + i, l = i > 1 ? qu[k - 1] : qu[k], r = i < nx - 1 ? qu[k + 1] : qu[k], b = j > 0 ? qu[k - nx - 1] : qu[k], f = j < nz - 1 ? qu[k + nx + 1] : qu[k];
+      u[k] += mix * (0.25 * (l + r + b + f) - qu[k]);
+    }
+    for (let j = 1; j < nz; j++) for (let i = 0; i < nx; i++) { const k = j * nx + i; qw[k] = w[k]; }
+    for (let j = 1; j < nz; j++) for (let i = 0; i < nx; i++) {
+      const k = j * nx + i, l = i > 0 ? qw[k - 1] : qw[k], r = i < nx - 1 ? qw[k + 1] : qw[k], b = j > 1 ? qw[k - nx] : qw[k], f = j < nz - 1 ? qw[k + nx] : qw[k];
+      w[k] += mix * (0.25 * (l + r + b + f) - qw[k]);
+    }
+    for (let j = 0; j < nz; j++) for (let i = 1; i < nx; i++) { const k = j * (nx + 1) + i; qu[k] = u[k] * (u[k] > 0 ? h[j * nx + i - 1] : h[j * nx + i]); }
+    for (let j = 1; j < nz; j++) for (let i = 0; i < nx; i++) { const k = j * nx + i; qw[k] = w[k] * (w[k] > 0 ? h[(j - 1) * nx + i] : h[k]); }
+    for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {   // a cell can not give away more than it has
+      const c = j * nx + i, r = qu[j * (nx + 1) + i + 1], l = qu[j * (nx + 1) + i], f = qw[(j + 1) * nx + i], b = qw[c];
+      const out = ((r > 0 ? r : 0) + (l < 0 ? -l : 0)) / dx + ((f > 0 ? f : 0) + (b < 0 ? -b : 0)) / dz;
+      scale[c] = out * dt > 0.9 * h[c] ? 0.9 * h[c] / (out * dt) : 1;
+    }
+    for (let j = 0; j < nz; j++) for (let i = 1; i < nx; i++) { const k = j * (nx + 1) + i; qu[k] *= scale[qu[k] > 0 ? j * nx + i - 1 : j * nx + i]; }
+    for (let j = 1; j < nz; j++) for (let i = 0; i < nx; i++) { const k = j * nx + i; qw[k] *= scale[qw[k] > 0 ? k - nx : k]; }
+    for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
+      const c = j * nx + i;
+      h[c] -= dt * ((qu[j * (nx + 1) + i + 1] - qu[j * (nx + 1) + i]) / dx + (qw[(j + 1) * nx + i] - qw[c]) / dz);
+      if (h[c] < 0) h[c] = 0;
+    }
+    // a wave that breaks against a wall would turn into a saw-tooth of spikes here: where the height jumps sharply
+    // from one cell to the next, water is shared between them (only there, so ordinary waves keep their shape; none is lost)
+    for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
+      const c = j * nx + i, hc = h[c];
+      scale[c] = Math.abs((i > 0 ? h[c - 1] : hc) + (i < nx - 1 ? h[c + 1] : hc) + (j > 0 ? h[c - nx] : hc) + (j < nz - 1 ? h[c + nx] : hc) - 4 * hc);
+    }
+    const sharp = (a, b) => 0.12 * Math.min(1, Math.max(scale[a], scale[b]) / 0.02);
+    for (let j = 0; j < nz; j++) for (let i = 0; i < nx - 1; i++) { const c = j * nx + i; qu[j * (nx + 1) + i + 1] = sharp(c, c + 1) * (h[c] - h[c + 1]); }
+    for (let j = 0; j < nz - 1; j++) for (let i = 0; i < nx; i++) { const c = j * nx + i; qw[c + nx] = sharp(c, c + nx) * (h[c] - h[c + nx]); }
+    for (let j = 0; j < nz; j++) for (let i = 0; i < nx - 1; i++) { const c = j * nx + i, t = qu[j * (nx + 1) + i + 1]; h[c] -= t; h[c + 1] += t; }
+    for (let j = 0; j < nz - 1; j++) for (let i = 0; i < nx; i++) { const c = j * nx + i, t = qw[c + nx]; h[c] -= t; h[c + nx] += t; }
+  }
+  at(x, z, o) {   // the water at (x, z) -> o: height above LEVEL, slope x, slope z, flow x, flow z
+    const { nx, nz, dx, dz, h, u, w } = this;
+    let gx = (x + TX) / dx - 0.5, gz = (z + TZ) / dz - 0.5;
+    gx = Math.min(Math.max(gx, 0), nx - 1.001); gz = Math.min(Math.max(gz, 0), nz - 1.001);
+    const i = gx | 0, j = gz | 0, fx = gx - i, fz = gz - j, k = j * nx + i, h00 = h[k], h10 = h[k + 1], h01 = h[k + nx], h11 = h[k + nx + 1];
+    o[0] = (h00 * (1 - fx) + h10 * fx) * (1 - fz) + (h01 * (1 - fx) + h11 * fx) * fz - LEVEL;
+    o[1] = ((h10 - h00) * (1 - fz) + (h11 - h01) * fz) / dx; o[2] = ((h01 - h00) * (1 - fx) + (h11 - h10) * fx) / dz;
+    o[3] = 0.5 * (u[j * (nx + 1) + i] + u[j * (nx + 1) + i + 1]); o[4] = 0.5 * (w[j * nx + i] + w[(j + 1) * nx + i]);
+  }
+}
+SWE = SWE_ON ? new ShallowWater(LEVEL) : null;
+
+const cellsFor = (n) => { const total = n * n * 0.61, r = TX / TZ; return [Math.round(Math.sqrt(total * r)), Math.round(Math.sqrt(total / r))]; };   // n x 0.61n cells in the original tank, the same number in any shape
+const SIM = cellsFor(G.simulation);                                              // ripple grid: 1.4 cm cells
+const CAUS = cellsFor(G.caustic);                                             // caustics texture: 7 mm texels
+const COMMON = /* glsl */`
+uniform vec3 uBottom;
+uniform float uSolid;
+uniform float uLamp, uDay, uDuckCount, uPlain, uTiles;
+uniform vec4 uDucks[50];            // the rubber ducks: body centre, heading (the first uDuckCount are in the water)
+uniform vec3 uLight, uLightCol, uAmb, uGlow;   // sun direction or lamp position; its colour; ambient; water glow
+uniform sampler2D uSurf, uCaus;    // the water's height (m) and slope over the tank; light reaching the tank floor
+const float PI = 3.14159265, LEVEL = ${f(LEVEL)}, IOR = ${f(IOR)}, DS = ${f(DS)};
+const vec3 TANK = vec3(${f(TX)}, ${f(TOP)}, ${f(TZ)}), ABSORB = vec3(${ABSORB.map(f)}), YELLOW = vec3(0.92, 0.6, 0.012);
+
+// water height above LEVEL and its slope at p: the sea and the ripples, drawn together once a frame (see surfMat)
+vec3 wave(vec2 p) {   // beyond the tank's edge the sea is mirrored (the slopes flip with it), so light from outside it has no streaks
+  vec2 uv = p / (2.0 * TANK.xz) + 0.5, m = mod(floor(uv), 2.0);
+  vec3 w = textureLod(uSurf, uv, 0.0).xyz;
+  return vec3(w.x, w.y * (1.0 - 2.0 * m.x), w.z * (1.0 - 2.0 * m.y));
+}
+vec3 dryFloor(vec3 q){vec2 g=abs(fract(q.xz*uTiles)-.5);vec3 alb=mix(vec3(.78,.83,.82),vec3(.36,.43,.45),smoothstep(.43,.47,max(g.x,g.y)));return alb/PI*(uLightCol*.65+uAmb);}
+vec3 normalOf(vec3 w) { return normalize(vec3(-w.y, 1.0, -w.z)); }
+// the duck's body, as duckBody() (duck units): ellipsoids and a sphere blended by a smooth minimum, a flat base
+float ell(vec3 p, vec3 r) { float k0 = length(p / r), k1 = length(p / (r * r)); return k0 * (k0 - 1.0) / k1; }
+float smin(float a, float b, float k) { float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0); return mix(b, a, h) - k * h * (1.0 - h); }
+vec3 tipped(vec3 p, vec2 c, float a) { vec2 q = p.xy - c; return vec3(cos(a) * q.x + sin(a) * q.y, cos(a) * q.y - sin(a) * q.x, p.z); }
+float duckShape(vec3 p) {
+  float d = ell(p - vec3(0.0, 0.28, 0.0), vec3(0.5, 0.3, 0.37));
+  d = smin(d, ell(tipped(p, vec2(-0.4, 0.46), 0.55), vec3(0.2, 0.13, 0.15)), 0.12);
+  d = smin(d, ell(p - vec3(0.22, 0.3, 0.0), vec3(0.3, 0.26, 0.31)), 0.1);
+  d = smin(d, length(p - vec3(0.25, 0.8, 0.0)) - 0.25, 0.14);
+  d = smin(d, ell(tipped(vec3(p.xy, abs(p.z) - 0.29), vec2(-0.04, 0.37), 0.25), vec3(0.27, 0.12, 0.08)), 0.05);
+  vec3 q = abs(p - vec3(0.0, 0.6, 0.0)) - vec3(1.17, 0.55, 1.17);
+  return max(d, length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - 0.03);
+}
+// a point, or a direction, in the duck's frame: duck units, x forward (without its lean)
+vec3 duckP(vec3 p, vec4 dk) { vec2 f = vec2(cos(dk.w), sin(dk.w)); vec3 q = (p - dk.xyz) / DS; return vec3(dot(q.xz, f), q.y, dot(q.xz, vec2(-f.y, f.x))); }
+vec3 duckV(vec3 v, vec4 dk) { vec2 f = vec2(cos(dk.w), sin(dk.w)); return vec3(dot(v.xz, f), v.y, dot(v.xz, vec2(-f.y, f.x))); }
+// a ray against the ducks' bodies, marched through their distance function: distance to the nearest (0 from inside, 1e9 on a miss), normal
+float duck(vec3 ro, vec3 rd, out vec3 n) {
+  n = vec3(0.0, 1.0, 0.0);
+  float best = 1e9;
+  for (int j = 0; j < 50; j++) {
+    if (float(j) >= uDuckCount) break;
+    vec4 dk = uDucks[j];
+    vec3 o = duckP(ro, dk), d = duckV(rd, dk), c = o - vec3(-0.05, 0.53, 0.0);   // first, a ball round it
+    float b = dot(c, d), h = b * b - dot(c, c) + 0.81;
+    if (h < 0.0) continue;
+    for (float t = max(-b - sqrt(h), 0.0), i = 0.0; i < 40.0 && t <= -b + sqrt(h); i++) {
+      vec3 p = o + d * t; const vec2 k = vec2(0.003, -0.003);
+      float e = duckShape(p);
+      if (e < 0.002) {
+        if (t * DS < best) {
+          vec3 m = k.xyy * duckShape(p + k.xyy) + k.yyx * duckShape(p + k.yyx) + k.yxy * duckShape(p + k.yxy) + k.xxx * duckShape(p + k.xxx);
+          vec2 f = vec2(cos(dk.w), sin(dk.w));
+          n = normalize(vec3(m.x * f.x - m.z * f.y, m.y, m.x * f.y + m.z * f.x));
+          best = t * DS;
+        }
+        break;
+      }
+      t += e;
+    }
+  }
+  return best;
+}
+// how much of the light along a ray from p gets past the ducks: 0 in a shadow, soft at the edges
+// (light seldom comes from a single point), from how close the ray passes to each body and head
+float duckClear(vec3 p, vec3 v) {
+  float clear = 1.0;
+  for (int j = 0; j < 50; j++) {
+    if (float(j) >= uDuckCount) break;
+    vec4 dk = uDucks[j];
+    vec3 o = duckP(p, dk), e = duckV(v, dk), R = vec3(0.5, 0.3, 0.37);
+    vec3 a = (o - vec3(0.0, 0.28, 0.0)) / R, b = e / R, c = (o - vec3(0.25, 0.8, 0.0)) / 0.25, g = e / 0.25;
+    clear *= smoothstep(0.7, 1.35, length(a + b * max(-dot(a, b) / dot(b, b), 0.0)))
+           * smoothstep(0.7, 1.35, length(c + g * max(-dot(c, g) / dot(g, g), 0.0)));
+  }
+  return clear;
+}
+float fresnel(float c) { return 0.02 + 0.98 * pow(1.0 - clamp(c, 0.0, 1.0), 5.0); }   // Schlick, water
+
+vec3 sky(vec3 d, float disk) {   // disk: how much of the sun's sharp disk to show (reflections use a softer glint)
+  if (uLamp > 0.5) return vec3(0.01, 0.014, 0.026) * (1.2 - 0.6 * clamp(d.y, 0.0, 1.0));   // night
+  float s = dot(d, uLight), g = max(s, 0.0);
+  vec3 c = mix(vec3(0.56, 0.67, 0.8), vec3(0.15, 0.32, 0.68), sqrt(clamp(d.y, 0.0, 1.0))) * uDay;
+  return c + uLightCol * (disk * smoothstep(0.99985, 0.99995, s) * 60.0 + (1.0 - disk) * pow(g, 900.0) * 7.0
+                          + pow(g, 24.0) * 0.12 + g * g * g * g * 0.05 * (1.0 - abs(d.y)));
+}
+// what a ray reflected or refracted at p sees: the sky, plus the lamp's bulb when it looks at it
+vec3 look(vec3 p, vec3 d) {
+  if (uLamp < 0.5) return sky(d, 0.0);
+  vec3 b = uLight - p;
+  return sky(d, 0.0) + uLightCol * 1.5 * smoothstep(0.998, 0.9997, dot(d, normalize(b))) / max(1.0, dot(b, b));
+}
+// entry and exit distances of a ray through the tank's box
+vec2 box(vec3 ro, vec3 rd) {
+  vec3 inv = 1.0 / (rd + vec3(1e-7)), t0 = (vec3(-TANK.x, 0.0, -TANK.z) - ro) * inv, t1 = (TANK - ro) * inv;
+  vec3 a = min(t0, t1), b = max(t0, t1);
+  return vec2(max(max(a.x, a.y), a.z), min(min(b.x, b.y), b.z));
+}
+// light arriving at a point in air: direction to the light and irradiance (the lamp shade makes a cone)
+vec3 lightAt(vec3 p, out vec3 L) {
+  if (uLamp < 0.5) { L = uLight; return uLightCol; }
+  vec3 d = uLight - p; float r2 = dot(d, d); L = d * inversesqrt(r2);
+  return uLightCol / r2 * smoothstep(0.35, 0.75, L.y);
+}
+vec3 ground(vec3 p, float px) {   // px: size of a pixel on the ground, for smooth tile lines
+  float e = 0.5 - max(abs(fract(p.x) - 0.5), abs(fract(p.z) - 0.5));
+  float line = (1.0 - smoothstep(0.01, 0.01 + px, e)) * min(1.0, 0.012 / px);
+  vec3 alb = vec3(0.2 + 0.03 * mod(floor(p.x) + floor(p.z), 2.0)) * (1.0 - 0.45 * line), L;
+  vec3 E = lightAt(p, L) * max(L.y, 0.0);
+  float dist = length(p - cameraPosition);
+  return mix(alb / PI * (E + uAmb), sky(normalize(vec3(p.x - cameraPosition.x, 0.0, p.z - cameraPosition.z)), 0.0), 1.0 - exp(-0.018 * dist));
+}
+${TANK_MODE ? /* glsl */`
+// Fish tank: the original walled tank (as in CAUSTIC//LITE v2.2.0): the floor ends at the glass, and light comes in through the walls.
+vec3 background(vec3 p, vec3 d) {
+  if (d.y >= 0.0) return look(p, d);
+  vec3 q = p - d * (p.y / d.y);
+  return ground(q, length(q - cameraPosition) * 0.002);
+}
+// the tank's tiles: 10 cm, mostly white with a few light blue, pink and yellow ones, and pale grout
+vec3 tileAt(vec2 uv) {
+  if (uPlain > 0.5) return vec3(0.93, 0.94, 0.96);   // background off: plain walls and floor, no tiles
+  vec2 cell = floor(uv * 10.0), g = abs(fract(uv * 10.0) - 0.5);
+  float h = fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453);
+  vec3 c = h > 0.86 ? vec3(0.62, 0.82, 0.95) : h > 0.78 ? vec3(0.97, 0.70, 0.76) : h > 0.72 ? vec3(0.99, 0.90, 0.52) : vec3(0.96, 0.96, 0.97);
+  return mix(c, vec3(0.80, 0.82, 0.86), smoothstep(0.45, 0.48, max(g.x, g.y)));
+}
+// One continuous pool floor is shared by the exposed bottom and the background.
+
+// a point on the back or a side wall: its tiles, lit evenly (the walls are not glass in the fish tank)
+vec3 wallColor(vec3 q) {
+  vec2 uv = abs(q.x) > TANK.x - 0.003 ? vec2(q.z, q.y) : vec2(q.x, q.y);
+  return tileAt(uv) / PI * (uLightCol * 0.55 + uAmb * 1.2);
+}
+// sunlight that comes in through a glass wall below the water line (it reaches a band of floor along
+// the sunlit walls that light through the surface can't), spread by the slant of its path
+vec3 wallLight(vec3 q) {
+  vec3 E = vec3(0.0);
+  if (uLamp > 0.5) return E;
+  for (int a = 0; a < 2; a++) {
+    vec3 n = a == 0 ? vec3(sign(uLight.x), 0.0, 0.0) : vec3(0.0, 0.0, sign(uLight.z));   // the sunlit wall, facing out
+    float ci = dot(uLight, n);
+    if (ci < 0.02) continue;
+    vec3 t = refract(-uLight, n, 1.0 / IOR);                                               // the light in the water
+    float u = (dot(q, n) - (a == 0 ? TANK.x : TANK.z)) / dot(t, n);                        // back along it to the wall
+    vec3 e = q - t * u;
+    if (e.y < LEVEL - 0.03 && abs(a == 0 ? e.z : e.x) < (a == 0 ? TANK.z : TANK.x))
+      E += 0.8 * (1.0 - fresnel(ci)) * -t.y * ci / abs(dot(t, n)) * exp(-ABSORB * u);
+  }
+  return E;
+}
+// the tank floor: tiles lit by the caustics texture, light through the walls, and the dim light that filters down
+vec3 floorColor(vec3 q) {
+  vec2 g = abs(fract(q.xz * 5.0) - 0.5);   // 20 cm tiles
+  float edge = min(TANK.x - abs(q.x), TANK.z - abs(q.z));
+  vec3 alb = tileAt(q.xz) * (0.75 + 0.25 * smoothstep(0.0, 0.3, edge));
+  if(uSolid>.5)alb=uBottom;
+  vec2 uv = q.xz / (2.0 * (TANK.xz+vec2(LEVEL))) + 0.5, o = 0.6 / vec2(${f(CAUS[0])}, ${f(CAUS[1])});   // four taps: a little smoother
+  vec3 caus = 0.25 * (texture(uCaus, uv + o).rgb + texture(uCaus, uv - o).rgb + texture(uCaus, uv + vec2(o.x, -o.y)).rgb + texture(uCaus, uv - vec2(o.x, -o.y)).rgb);
+  return alb / PI * (uLightCol * (caus + wallLight(q)) + uAmb * exp(-ABSORB * LEVEL * 1.5));
+}
+` : /* glsl */`
+vec3 floorColor(vec3 q);
+vec3 background(vec3 p,vec3 d){if(d.y<-.001){vec3 hit=p+d*(-p.y/d.y);return floorColor(hit);}return look(p,d);}
+
+// Continuous bottom: tiles or solid colour, lit by caustics and filtered ambient light.
+vec3 floorColor(vec3 q) {
+  // A solid bottom has the same lighting as tiles; true black absorbs caustics.
+  vec2 g = abs(fract(q.xz * uTiles) - 0.5);   // tiles per metre: 5 (20 cm), more in the water box so it looks further away (its Floor tiles slider)
+  vec3 alb = mix(vec3(0.78, 0.83, 0.82), vec3(0.36, 0.43, 0.45), smoothstep(0.43, 0.47, max(g.x, g.y)));
+  if(uSolid>.5)alb=uBottom;
+  vec2 uv = q.xz / (2.0 * (TANK.xz+vec2(LEVEL))) + 0.5, o = 0.6 / vec2(${f(CAUS[0])}, ${f(CAUS[1])});   // four taps: a little smoother
+  vec3 caus = 0.25 * (texture(uCaus, uv + o).rgb + texture(uCaus, uv - o).rgb + texture(uCaus, uv + vec2(o.x, -o.y)).rgb + texture(uCaus, uv - vec2(o.x, -o.y)).rgb);
+  return alb / PI * (uLightCol * caus + uAmb * exp(-ABSORB * LEVEL * 1.5));
+}
+`}
+// distance along a ray going up inside the water to the wavy surface (or tmax): step until it has
+// crossed, then narrow it down between the last two steps
+float surface(vec3 ro, vec3 rd, float tmax) {
+  float t0 = 0.0, f0 = -1e-4, dt = min(tmax, (LEVEL + 0.3 - ro.y) / rd.y) / 10.0;
+  for (int i = 1; i <= 10; i++) {
+    float t1 = dt * float(i);
+    vec3 p = ro + rd * t1;
+    float f1 = p.y - LEVEL - wave(clamp(p.xz, -TANK.xz, TANK.xz)).x;
+    if (f1 > 0.0) {
+      for (int j = 0; j < 3; j++) {
+        float tm = t0 + (t1 - t0) * f0 / (f0 - f1);
+        vec3 q = ro + rd * tm;
+        float fm = q.y - LEVEL - wave(clamp(q.xz, -TANK.xz, TANK.xz)).x;
+        if (fm > 0.0) { t1 = tm; f1 = fm; } else { t0 = tm; f0 = fm; }
+      }
+      return t0 + (t1 - t0) * f0 / (f0 - f1);
+    }
+    t0 = t1; f0 = f1;
+  }
+  return 1e9;
+}
+${TANK_MODE ? /* glsl */`
+// a ray inside the water: absorbed and lit by the water as it goes; it ends on the floor, or leaves
+// through a wall or the surface, reflecting part of itself back in (all of it past the critical angle)
+vec3 water(vec3 p, vec3 d) {
+  vec3 col = vec3(0.0), thr = vec3(1.0);
+  for (int i = 0; i < 3; i++) {
+    float tx = (sign(d.x) * TANK.x - p.x) / (d.x + 1e-7), tz = (sign(d.z) * TANK.z - p.z) / (d.z + 1e-7);
+    float tf = d.y < 0.0 ? -p.y / d.y : 1e9, ts = d.y > 0.0 ? surface(p, d, min(tx, tz)) : 1e9;
+    vec3 dn, L;
+    float td = duck(p, d, dn), t = min(min(min(tf, ts), min(tx, tz)), td);
+    vec3 T = exp(-ABSORB * t), q = p + d * t;
+    col += thr * uGlow * (1.0 - T);
+    thr *= T;
+    if (t == td) {   // the duck's hull under the water, lit through the surface and by the glow around it
+      vec3 E = lightAt(q, L) * (0.1 + 0.3 * (0.5 + 0.5 * dn.y)) * exp(-ABSORB * max(LEVEL - q.y, 0.0));
+      return col + thr * YELLOW / PI * (E + uAmb * 0.5);
+    }
+    if (t == tf) return col + thr * floorColor(q);
+    if (t != ts && !(tz < tx && d.z > 0.0)) return col + thr * wallColor(q);   // the back and side walls are tiled; only the front is glass
+    vec3 n = t == ts ? -normalOf(wave(clamp(q.xz, -TANK.xz, TANK.xz))) : (tx < tz ? vec3(-sign(d.x), 0.0, 0.0) : vec3(0.0, 0.0, -sign(d.z)));
+    vec3 r = refract(d, n, IOR);
+    float F = dot(r, r) < 0.5 ? 1.0 : fresnel(-dot(r, n));
+    col += thr * (1.0 - F) * (t == ts ? look(q, r) : 0.9 * background(q, r));
+    thr *= F; p = q + n * 1e-3; d = reflect(d, n);
+  }
+  return col + thr * uGlow;
+}
+` : /* glsl */`
+// Top-down rays travel through continuous water to an unbounded bottom.
+// There are no hidden glass sides, rim shadows or side-wall reflections.
+vec3 water(vec3 p,vec3 d){
+  if(d.y>=-.0001)return look(p,d);
+  float tf=-p.y/d.y;
+  vec3 dn,L;
+  float td=duck(p,d,dn);
+  float t=min(tf,td);
+  vec3 q=p+d*t,T=exp(-ABSORB*t);
+  vec3 col=uGlow*(vec3(1.)-T);
+  if(td<tf){
+    vec3 E=lightAt(q,L)*(.1+.3*(.5+.5*dn.y))*exp(-ABSORB*max(LEVEL-q.y,0.));
+    return col+T*YELLOW/PI*(E+uAmb*.5);
+  }
+  return col+T*floorColor(q);
+}
+
+`}
+`;
+const VERT = /* glsl */`varying vec3 vPos; varying vec3 vNrm;
+void main() { vPos = (modelMatrix * vec4(position, 1.0)).xyz; vNrm = normal; gl_Position = projectionMatrix * viewMatrix * vec4(vPos, 1.0); }`;
+const OUT = '#include <tonemapping_fragment>\n#include <colorspace_fragment>\n';
+
+// Turn a distance function into triangles (naive surface nets): a vertex in every grid cell the surface
+// passes through (the average of where it crosses the cell's edges, pulled onto the surface), and a
+// quad across every grid edge it crosses. Normals come from the function's gradient, so the shading is
+// smooth. Points more than four cells from the surface skip the full evaluation (a coarse pass first).
+const EDGES = [];
+for (let c = 0; c < 8; c++) for (const b of [1, 2, 4]) if (!(c & b)) EDGES.push(c, c | b);
+function surfaceNet(sdf, lo, hi, h, scale) {
+  const nx = Math.ceil((hi[0] - lo[0]) / h) + 1, ny = Math.ceil((hi[1] - lo[1]) / h) + 1, nz = Math.ceil((hi[2] - lo[2]) / h) + 1, S = [1, nx, nx * ny];
+  const V = new Float32Array(nx * ny * nz), id = new Int32Array(nx * ny * nz).fill(-1), P = [], N = [], I = [];
+  const mx = (nx >> 2) + 2, my = (ny >> 2) + 2, C = new Float32Array(mx * my * ((nz >> 2) + 2));
+  for (let k = 0, q = 0; q < C.length; k++) for (let j = 0; j < my; j++) for (let i = 0; i < mx; i++, q++) C[q] = sdf(lo[0] + 4 * i * h, lo[1] + 4 * j * h, lo[2] + 4 * k * h);
+  for (let k = 0, q = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++, q++) {
+    const c = C[(((k + 2) >> 2) * my + ((j + 2) >> 2)) * mx + ((i + 2) >> 2)];
+    V[q] = Math.abs(c) > 4 * h ? c : sdf(lo[0] + i * h, lo[1] + j * h, lo[2] + k * h);
+  }
+  const corner = [0, 1, 2, 3, 4, 5, 6, 7].map((c) => (c & 1) + (c >> 1 & 1) * S[1] + (c >> 2) * S[2]), e = h * 0.05;
+  for (let k = 0; k < nz - 1; k++) for (let j = 0; j < ny - 1; j++) for (let i = 0, q = (k * ny + j) * nx; i < nx - 1; i++, q++) {
+    let n = 0, sx = 0, sy = 0, sz = 0;
+    for (let a = 0; a < 24; a += 2) {
+      const c0 = EDGES[a], c1 = EDGES[a + 1], v0 = V[q + corner[c0]], v1 = V[q + corner[c1]];
+      if ((v0 < 0) === (v1 < 0)) continue;
+      const t = v0 / (v0 - v1);
+      sx += (c0 & 1) + ((c1 & 1) - (c0 & 1)) * t; sy += (c0 >> 1 & 1) + ((c1 >> 1 & 1) - (c0 >> 1 & 1)) * t; sz += (c0 >> 2) + ((c1 >> 2) - (c0 >> 2)) * t; n++;
+    }
+    if (!n) continue;
+    let x = lo[0] + (i + sx / n) * h, y = lo[1] + (j + sy / n) * h, z = lo[2] + (k + sz / n) * h;
+    for (let it = 0; it < 2; it++) {   // one step onto the surface, then the normal there
+      const d = sdf(x, y, z), gx = sdf(x + e, y, z) - d, gy = sdf(x, y + e, z) - d, gz = sdf(x, y, z + e) - d, l = Math.hypot(gx, gy, gz) || 1;
+      if (it) N.push(gx / l, gy / l, gz / l); else { const m = Math.max(-h / 2, Math.min(h / 2, d)) / l; x -= m * gx; y -= m * gy; z -= m * gz; }
+    }
+    id[q] = P.length / 3; P.push(x * scale, y * scale, z * scale);
+  }
+  for (let k = 1; k < nz - 1; k++) for (let j = 1; j < ny - 1; j++) for (let i = 1, q = (k * ny + j) * nx + 1; i < nx - 1; i++, q++) {
+    const inside = V[q] < 0;
+    for (let a = 0; a < 3; a++) {   // the grid edge from here along axis a crosses the surface: join the four cells around it
+      if ((V[q + S[a]] < 0) === inside) continue;
+      const b = S[(a + 1) % 3], c = S[(a + 2) % 3], q00 = id[q - b - c], q10 = id[q - c], q11 = id[q], q01 = id[q - b];
+      if (q00 < 0 || q10 < 0 || q11 < 0 || q01 < 0) continue;
+      if (inside) I.push(q00, q10, q11, q00, q11, q01); else I.push(q00, q11, q10, q00, q01, q11);
+    }
+  }
+  return { P, N, I };
+}
+
+async function gpuRenderer(canvas) {
+  // start loading three.js, and meanwhile turn the duck's body and beak into triangles (surfaceNet)
+  const load = Promise.all(['three', 'three/addons/controls/OrbitControls.js', 'three/addons/misc/GPUComputationRenderer.js'].map((m) => import(m)));
+  const nets = [surfaceNet(duckBody, [-0.66, -0.02, -0.42], [0.56, 1.08, 0.42], 0.014, DS), surfaceNet(duckBeak, [0.33, 0.62, -0.16], [0.74, 0.84, 0.16], 0.0035, DS)];
+  const [THREE, { OrbitControls }, { GPUComputationRenderer }] = await load;
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: G.name!=='low', powerPreference: 'high-performance' });   // throws without WebGL 2
+  const ext = renderer.extensions, scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(FOV, 1, 0.05, 2000);
+  if (!ext.has('EXT_color_buffer_float') && !ext.has('EXT_color_buffer_half_float')) throw new Error('no float render targets');
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  canvas.addEventListener('webglcontextrestored', () => location.reload());
+  camera.position.set(6.4 * Math.cos(0.34) * Math.sin(0.62), 0.55 + 6.4 * Math.sin(0.34), 6.4 * Math.cos(0.34) * Math.cos(0.62));
+  if (OUTSIDE) camera.up.set(0, 1, 0); else camera.up.set(0,0,-1);   // set before OrbitControls is made: it turns around the up it sees then
+  const controls = new OrbitControls(camera, canvas);
+  controls.enabled=false;
+  controls.target.set(...TARGET);
+  Object.assign(controls, { enableDamping: true, dampingFactor: 0.08, enablePan: false, minDistance: 3.6, maxDistance: 14, minPolarAngle: 0.22, maxPolarAngle: 1.51 });
+
+  // The ripple simulation: a height field (mm) on the GPU. Each cell moves toward the average of its
+  // neighbours and overshoots (the wave equation); ClampToEdge sampling makes the glass reflect them.
+  // Splashes add a bump; the duck's hull, moving and bobbing, pushes the water aside (see hull()).
+  const gpu = new GPUComputationRenderer(SIM[0], SIM[1], renderer).setDataType(THREE.HalfFloatType);
+  const sim = gpu.addVariable('heightmap', /* glsl */`
+    uniform vec4 uDrops[8], uHullA[50], uHullB[50]; uniform float uHullN;   // splashes: x, z, radius (m), height (mm); each duck's hull before and after this step
+    float hull(vec2 p, vec4 d) {   // as hull()
+      vec2 q = p - d.xy, f = vec2(cos(d.z), sin(d.z)), u = vec2(dot(q, f), dot(q, vec2(-f.y, f.x))) / vec2(${f(FOOT[0])}, ${f(FOOT[1])});
+      float r = max(0.0, 1.0 - dot(u, u)); return d.w * r * r;
+    }
+    void main() {
+      vec2 cell = 1.0 / resolution.xy, uv = gl_FragCoord.xy * cell;
+      vec4 c = texture2D(heightmap, uv);
+      float nb = texture2D(heightmap, uv + vec2(0.0, cell.y)).r + texture2D(heightmap, uv - vec2(0.0, cell.y)).r
+               + texture2D(heightmap, uv + vec2(cell.x, 0.0)).r + texture2D(heightmap, uv - vec2(cell.x, 0.0)).r;
+      float h = (nb * 0.5 - c.g) * 0.994;
+      vec2 p = (uv - 0.5) * vec2(${f(2 * TX)}, ${f(2 * TZ)});
+      for (int i = 0; i < 8; i++) { vec2 q = (p - uDrops[i].xy) / uDrops[i].z; h += uDrops[i].w * exp(-dot(q, q)); }
+      float held = 0.0;
+      for (int k = 0; k < 50; k++) {
+        if (float(k) >= uHullN) break;
+        h += ${f(PUSH)} * (hull(p, uHullA[k]) - hull(p, uHullB[k]));
+        held += hull(p, vec4(uHullB[k].xyz, 1.0));
+      }
+      h *= 1.0 - 0.15 * min(held, 1.0);   // under a hull there is no free surface: it holds the water still
+      ${TANK_MODE ? 'h = clamp(h, -60.0, 60.0);   // the small fish tank: splashes bouncing between close walls must not pile up past 6 cm' : ''}
+      gl_FragColor = vec4(h, c.r, 0.0, 1.0);
+    }`, gpu.createTexture());
+  gpu.setVariableDependencies(sim, [sim]);
+  sim.minFilter = sim.magFilter = THREE.LinearFilter;
+  const dropU = new Float32Array(32), hullA = new Float32Array(200), hullB = new Float32Array(200);
+  Object.assign(sim.material.uniforms, { uDrops: { value: dropU }, uHullA: { value: hullA }, uHullB: { value: hullB }, uHullN: { value: 0 } });
+  const err = gpu.init(); if (err) throw new Error(err);
+
+  // uniforms shared by every material below
+  const U = { uUnder: { value: 0 }, uBottom:{value:new THREE.Color(WATER_FLOOR.color)},uSolid:{value:WATER_FLOOR.solid?1:0}, uCoat:{value:0},uCoatSh:{value:new THREE.Color()},uCoatMid:{value:new THREE.Color()},uCoatLi:{value:new THREE.Color()},uCoatIri:{value:0},uCoatPast:{value:0}, uTime: { value: 0 }, uLamp: { value: 0 }, uDay: { value: 1 }, uW: { value: waveUniform }, uA: { value: ampUniform },
+    uLight: { value: new THREE.Vector3() }, uLightCol: { value: new THREE.Vector3() }, uAmb: { value: new THREE.Vector3() },
+    uGlow: { value: new THREE.Vector3() }, uSim: { value: null }, uSurf: { value: null }, uCaus: { value: null },
+    uDucks: { value: new Float32Array(200) }, uDuckCount: { value: 0 }, uPlain: { value: 1 }, uTiles: { value: 5 }, uTilt: { value: new THREE.Vector2() }, uBottle: { value: 0 } };
+  // Once a frame, the sea's waves plus the ripples, with their slopes, into one texture that every
+  // shader below reads the water from.
+  const surfRT = gpu.createRenderTarget(0, 0, THREE.MirroredRepeatWrapping, THREE.MirroredRepeatWrapping, THREE.LinearFilter, THREE.LinearFilter);
+  // One compact readback replaces per-duck/per-point GPU reads.
+  const buoyTarget=new THREE.WebGLRenderTarget(50,1,{type:THREE.FloatType,depthBuffer:false,stencilBuffer:false});
+  const buoyPixels=new Float32Array(200),buoyDucks=new Float32Array(200);
+  const buoyScene=new THREE.Scene(),buoyCamera=new THREE.Camera();
+  const buoyMaterial=new THREE.ShaderMaterial({uniforms:{surface:{value:surfRT.texture},ducks:{value:buoyDucks}},vertexShader:'void main(){gl_Position=vec4(position.xy,0.,1.);}',fragmentShader:`
+    uniform sampler2D surface;uniform vec4 ducks[50];
+    float heightAt(vec2 p){return texture2D(surface,p/vec2(${f(2*TX)},${f(2*TZ)})+.5).x;}
+    void main(){int i=int(gl_FragCoord.x);vec4 d=ducks[i];vec2 f=vec2(cos(d.z),sin(d.z)),side=vec2(-f.y,f.x);
+      float a=heightAt(d.xy+f*${f(FOOT[0]*.8)}),b=heightAt(d.xy-f*${f(FOOT[0]*.8)}),c=heightAt(d.xy+side*${f(FOOT[1]*.8)}),e=heightAt(d.xy-side*${f(FOOT[1]*.8)});
+      vec2 slope=f*(a-b)/${f(1.6*FOOT[0])}+side*(c-e)/${f(1.6*FOOT[1])};
+      gl_FragColor=vec4((heightAt(d.xy)*2.+a+b+c+e)/6.,slope,1.);
+    }`});
+  const buoyQuad=new THREE.Mesh(new THREE.PlaneGeometry(2,2),buoyMaterial);buoyQuad.frustumCulled=false;buoyScene.add(buoyQuad);
+  let buoyElapsed=1;
+  const sweTex = SWE ? new THREE.DataTexture(new Uint16Array(SWE.h.length), SWE.nx, SWE.nz, THREE.RedFormat, THREE.HalfFloatType) : null;
+  if (sweTex) { sweTex.minFilter = sweTex.magFilter = THREE.LinearFilter; sweTex.needsUpdate = true; }
+  const surfMat = gpu.createShaderMaterial(/* glsl */`
+    uniform sampler2D uSwe; uniform vec2 uSweTexel; uniform float uSweOn;   // the fish tank's shallow water: its depth (m) over the tank
+    uniform float uTime;
+    uniform vec2 uTilt;         // Tilt & play: the water's lean (slope in x and z)
+    uniform vec4 uW[${NW}];     // per wave: direction * wavenumber, angular speed, phase
+    uniform float uA[${NW}];    // per wave: height now (m)
+    uniform sampler2D uSim;
+    void main() {
+      vec2 uv = gl_FragCoord.xy / resolution.xy, e = 1.0 / resolution.xy, p = (uv - 0.5) * vec2(${f(2 * TX)}, ${f(2 * TZ)});
+      vec3 w = vec3(0.0);
+      for (int i = 0; i < ${NW}; i++) {   // as waveAt(): each wave's crests are bent by a slower wave running along them
+        vec2 kd = uW[i].xy, side = vec2(-kd.y, kd.x) / length(kd);
+        float kb = 0.37 * length(kd), pb = kb * dot(side, p) + 0.9 * uTime + 7.1 * float(i);
+        float ph = dot(kd, p) - uW[i].z * uTime + uW[i].w + 1.6 * sin(pb);
+        w += uA[i] * vec3(sin(ph), cos(ph) * (kd + 1.6 * kb * cos(pb) * side));
+      }
+      float tt = tanh(dot(uTilt, p) / ${f(TILT_H)});   // the leaning water, deeper on the low side
+      w += vec3(${f(TILT_H)} * tt, uTilt * (1.0 - tt * tt));
+      float h = texture2D(uSim, uv).r;   // + the ripples (mm)
+      float hx = texture2D(uSim, uv + vec2(e.x, 0.0)).r - texture2D(uSim, uv - vec2(e.x, 0.0)).r;
+      float hz = texture2D(uSim, uv + vec2(0.0, e.y)).r - texture2D(uSim, uv - vec2(0.0, e.y)).r;
+      if (uSweOn > 0.5) {
+        vec2 t = uSweTexel;
+        float hc = texture2D(uSwe, uv).r;
+        float sx = (texture2D(uSwe, uv + vec2(t.x, 0.0)).r - texture2D(uSwe, uv - vec2(t.x, 0.0)).r) / (2.0 * t.x * ${f(2 * TX)});
+        float sz = (texture2D(uSwe, uv + vec2(0.0, t.y)).r - texture2D(uSwe, uv - vec2(0.0, t.y)).r) / (2.0 * t.y * ${f(2 * TZ)});
+        w += vec3(hc - ${f(LEVEL)}, 0.15 * sx, 0.15 * sz);   // the bulk slope bends light only a little (seen from above it would smear the floor); the depth shows in the colour
+      }
+      gl_FragColor = vec4(w + 0.001 * vec3(h, hx * resolution.x / ${f(4 * TX)}, hz * resolution.y / ${f(4 * TZ)}), 1.0);
+    }`, { uTime: U.uTime, uTilt: U.uTilt, uW: U.uW, uA: U.uA, uSim: U.uSim, uSwe: { value: sweTex }, uSweTexel: { value: new THREE.Vector2(SWE ? 1 / SWE.nx : 1, SWE ? 1 / SWE.nz : 1) }, uSweOn: { value: SWE ? 1 : 0 } });
+  const mat = (frag, o = {}) => new THREE.ShaderMaterial(Object.assign({ uniforms: U, vertexShader: VERT, fragmentShader: 'varying vec3 vPos; varying vec3 vNrm;\n' + COMMON + frag }, o));
+
+  addEventListener('water-floor-change',()=>{U.uBottom.value.set(WATER_FLOOR.color);U.uSolid.value=WATER_FLOOR.solid?1:0;});
+  const materialPicker=$('causticMaterial');
+  for(const k of WATER_MATERIALS){const option=document.createElement('option');option.value=k.id;option.textContent=k.name;materialPicker.append(option);}
+  try { const saved = localStorage.getItem('water.boxMaterial'); if ([...materialPicker.options].some(o=>o.value===saved)) materialPicker.value=saved; } catch {}
+  function applyCoat(){try{localStorage.setItem('water.boxMaterial',materialPicker.value);}catch{}const k=WATER_MATERIALS.find(k=>k.id===materialPicker.value);U.uCoat.value=k?+$('causticCoating').value/100:0;if(k){U.uCoatSh.value.set(k.sh);U.uCoatMid.value.set(k.mid);U.uCoatLi.value.set(k.li);U.uCoatIri.value=k.iri||0;U.uCoatPast.value=k.past||0;}}
+  materialPicker.onchange=applyCoat;$('causticCoating').oninput=applyCoat;applyCoat();
+  // Caustics. Every vertex of a fine grid on the surface sends a light ray through the water to the
+  // floor, and the grid is drawn where the rays land. A cell of surface that lands on a smaller patch
+  // of floor concentrates its light, so each fragment gets the area ratio of the two (from screen-space
+  // derivatives), and overlapping patches add up.
+  const causRT = new THREE.WebGLRenderTarget(CAUS[0], CAUS[1], { type: THREE.HalfFloatType, depthBuffer: false, wrapS: THREE.MirroredRepeatWrapping, wrapT: THREE.MirroredRepeatWrapping, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
+  const grid = new THREE.PlaneGeometry(2 * TX, 2 * TZ, SIM[0], SIM[1]).rotateX(-Math.PI / 2);
+  const causScene = new THREE.Scene(), flatCam = new THREE.Camera();
+  const lightGrid=new THREE.PlaneGeometry(2*TX+4*LEVEL,2*TZ+4*LEVEL,SIM[0],SIM[1]).rotateX(-Math.PI/2);
+  const causMesh = new THREE.Mesh(lightGrid, new THREE.ShaderMaterial({ uniforms: U, side: THREE.DoubleSide, depthTest: false, depthWrite: false,
+    blending: THREE.CustomBlending, blendSrc: THREE.OneFactor, blendDst: THREE.OneFactor,
+    vertexShader: COMMON + /* glsl */`
+      varying vec2 vSurf; varying vec3 vI;
+      void main() {
+        vec3 w = wave(position.xz), P = vec3(position.x, max(LEVEL + w.x, 0.004), position.z), n = normalOf(w);
+        vec3 d = uLamp > 0.5 ? P - uLight : -uLight, Lin = normalize(d);
+        float E = uLamp > 0.5 ? smoothstep(0.35, 0.75, -Lin.y) / dot(d, d) : 1.0;   // lamp: inverse square, inside the shade's cone
+        vec3 r = refract(Lin, n, 1.0 / IOR);
+        float t = P.y / max(-r.y, 0.05);
+        vec3 F = P + r * t;
+        vI = E * max(-Lin.y, 0.0) * (1.0 - fresnel(dot(-Lin, n))) * exp(-ABSORB * t);
+        vI *= mix(0.2, 1.0, duckClear(P, -Lin) * duckClear(P, r));   // the duck's shadow (a little light scatters into it)
+        vSurf = position.xz;
+        gl_Position = vec4(F.x / (TANK.x+LEVEL), F.z / (TANK.z+LEVEL), 0.0, 1.0);
+      }`,
+    fragmentShader: /* glsl */`
+      varying vec2 vSurf; varying vec3 vI;
+      void main() {
+        vec2 a = dFdx(vSurf), b = dFdy(vSurf);
+        gl_FragColor = vec4(vI * min(abs(a.x * b.y - a.y * b.x) / ${(4 * (TX+LEVEL) * (TZ+LEVEL) / (CAUS[0] * CAUS[1])).toExponential(6)}, 40.0), 1.0);
+      }` }));
+  causMesh.frustumCulled = false; causScene.add(causMesh);
+
+  // sky and ground
+  const skyDome = new THREE.Mesh(new THREE.SphereGeometry(900, 32, 16), mat('void main() { gl_FragColor = vec4(sky(normalize(vPos - cameraPosition), 1.0), 1.0);\n' + OUT + '}', { side: THREE.BackSide, depthWrite: false }));
+  skyDome.renderOrder = -1;
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(400, 400).rotateX(-Math.PI / 2),
+    mat('void main() { gl_FragColor = vec4(ground(vPos, max(fwidth(vPos.x), fwidth(vPos.z))), 1.0);\n' + OUT + '}'));
+  // the water surface: moved by the waves, it reflects the sky and refracts the view into the water
+  const surface = new THREE.Mesh(grid, mat(/* glsl */`
+    uniform float uCoat,uCoatIri,uCoatPast,uBottle,uUnder;
+    uniform vec3 uCoatSh,uCoatMid,uCoatLi;
+    vec3 coatPalette(float t){return .5+.5*cos(6.28318*(t+vec3(0.,.33,.67)));}
+
+    void main() {
+      vec3 n = normalOf(wave(vPos.xz)), d = normalize(vPos - cameraPosition);
+      if (uUnder > 0.5) {   // upside down: the surface seen from under the water. Through a bright round window the sky and the ducks' tops
+        // show (bent by the water); outside it the surface is a mirror that shows the water and its floor (total internal reflection)
+        vec3 m = -n, t = refract(d, m, IOR), r = reflect(d, m), L;
+        float F = dot(t, t) < 0.5 ? 1.0 : fresnel(dot(t, n));
+        vec3 dn, above = look(vPos, t);
+        float td = F < 1.0 ? duck(vPos + t * 1e-3, t, dn) : 1e9;
+        if (td < 1e8) above = YELLOW / PI * (lightAt(vPos + t * td, L) * max(dot(dn, L), 0.0) + uAmb) + 0.04 * look(vPos, reflect(t, dn));
+        vec3 col = F * water(vPos + m * 1e-3, r) + (1.0 - F) * above;
+        col += uLightCol * 0.35 * smoothstep(0.05, 0.4, length(n.xz)) * (1.0 - F);   // where ripples bend the light it flickers bright, as seen looking up in a pool
+        float len = vPos.y / max(d.y, 0.05) + 0.6;   // the water between the screen and the surface, and a little more so it reads as under water
+        vec3 T = exp(-2.0 * ABSORB * len);
+        col = col * T + (uGlow * 6.0 + vec3(0.0, 0.05, 0.07)) * (1.0 - T);
+        if (vPos.y < 0.03) col = mix(look(vPos, d), col, smoothstep(0.004, 0.03, vPos.y));   // a dry patch: a clear window
+        gl_FragColor = vec4(col, 1.0);
+      } else {
+      if (dot(d, n) > -0.02) n = normalize(n - d * (dot(d, n) + 0.02));
+      float F = fresnel(-dot(d, n)) * smoothstep(0.004, 0.03, vPos.y);   // where the water has left, the floor shows plainly
+      gl_FragColor = vec4(F * look(vPos, reflect(d, n)) + (1.0 - F) * water(vPos, refract(d, n, 1.0 / IOR)), 1.0);
+      }
+      if(uUnder<.5&&vPos.y<.012)gl_FragColor.rgb=dryFloor(vPos);
+      if(uCoat>0.&&uUnder<.5&&vPos.y>=.012){
+        vec3 cn=normalize(vec3(n.x*5.,n.z*5.,n.y));
+        float lit=smoothstep(.1,.98,dot(cn,normalize(vec3(-.45,.65,.6)))*.5+.5);
+        vec3 coat=mix(uCoatSh,uCoatMid,smoothstep(.08,.55,lit));coat=mix(coat,uCoatLi,smoothstep(.6,.97,lit));
+        float ph=(1.-cn.z)*2.8+cn.y*.8+cn.x*.55;
+        coat=mix(coat,mix(coatPalette(ph),vec3(.88),uCoatPast*.6),uCoatIri);
+        vec3 cr=reflect(vec3(0.,0.,-1.),cn);float shine=exp(-pow((cr.x*.8+cr.y*.6-.28)/.09,2.));
+        coat=coat*(.35+.6*lit)+mix(vec3(1.),coat,.4)*shine;
+        gl_FragColor.rgb=mix(gl_FragColor.rgb,coat,uCoat*(.35+.65*smoothstep(.002,.05,length(n.xz))));
+      }
+      if (uBottle > 0.5 && uUnder < 0.5 && vPos.y >= .012) gl_FragColor.rgb *= exp(-1.2 * clamp(wave(vPos.xz).x, -1.0, 1.0));   // Depth tint belongs to wet water; dry tiles match the continuous floor.
+      ${OUT}
+    }`, { vertexShader: COMMON + /* glsl */`
+      varying vec3 vPos; varying vec3 vNrm;
+      void main() { vPos = vec3(position.x, max(LEVEL + wave(position.xz).x, 0.004), position.z); vNrm = vec3(0.0, 1.0, 0.0);
+        gl_Position = projectionMatrix * viewMatrix * vec4(vPos, 1.0); }` }));
+  surface.frustumCulled = false; surface.material.side = THREE.DoubleSide;   // seen from under the water too, when the device is upside down
+  // the water behind the glass walls, up to the moving water line (above it the fragments are dropped)
+  const sideH = TOP - 0.02;
+  const sides = new THREE.Mesh(new THREE.BoxGeometry(2 * TX, sideH, 2 * TZ).translate(0, sideH / 2, 0), mat(/* glsl */`
+    void main() {
+      float h = LEVEL + wave(clamp(vPos.xz, -TANK.xz, TANK.xz)).x;
+      if (vPos.y > h || abs(vNrm.y) > 0.5) discard;
+      vec3 d = normalize(vPos - cameraPosition);
+      vec3 col = water(vPos, refract(d, vNrm, 1.0 / IOR));
+      float px = fwidth(vPos.y);   // the meniscus: a thin bright line where the water meets the glass
+      col = mix(col, 0.25 * look(vPos, reflect(d, vec3(0.0, 1.0, 0.0))) + uGlow * 4.0, 0.5 * (1.0 - smoothstep(px, 3.0 * px, h - vPos.y)));
+      gl_FragColor = vec4(col, 1.0);
+      ${OUT}
+    }`));
+  // glass: faint reflections (premultiplied: rgb = reflection, alpha = how much of the view it hides)
+  const glass = new THREE.Mesh(new THREE.BoxGeometry(2 * TX + 0.012, TOP, 2 * TZ + 0.012).translate(0, TOP / 2, 0), mat(/* glsl */`
+    void main() {
+      if (abs(vNrm.y) > 0.5) discard;   // open top, and the floor is tiles
+      vec3 d = normalize(vPos - cameraPosition), n = normalize(vNrm) * (gl_FrontFacing ? 1.0 : -1.0);
+      float F = 0.04 + 0.96 * pow(1.0 - abs(dot(d, n)), 5.0);
+      gl_FragColor = vec4(F * background(vPos, reflect(d, n)), F + 0.04);
+      ${OUT}
+    }`, { transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.CustomBlending, blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor }));
+  // a dark frame along the edges, and the lamp (a shade, a warm bulb and a cord)
+  const dark = new THREE.MeshStandardMaterial({ color: TANK_MODE ? 0xf2f2f8 : 0x2b3035, roughness: 0.45, metalness: 0.3 });
+  if (TANK_MODE) dark.emissive.set(0x8a8a96);   // the fish tank's edges read as pale glass edges
+  const frame = new THREE.Group(), e = 0.013;
+  for (const [sx, sy, sz, x, y, z] of [[2 * TX, e, e, 0, 0, TZ], [2 * TX, e, e, 0, 0, -TZ], [2 * TX, e, e, 0, TOP, TZ], [2 * TX, e, e, 0, TOP, -TZ],
+    [e, e, 2 * TZ, TX, 0, 0], [e, e, 2 * TZ, -TX, 0, 0], [e, e, 2 * TZ, TX, TOP, 0], [e, e, 2 * TZ, -TX, TOP, 0],
+    [e, TOP, e, TX, TOP / 2, TZ], [e, TOP, e, -TX, TOP / 2, TZ], [e, TOP, e, TX, TOP / 2, -TZ], [e, TOP, e, -TX, TOP / 2, -TZ]]) {
+    const b = new THREE.Mesh(new THREE.BoxGeometry(sx + e, sy, sz + e), dark);
+    b.position.set(x, y, z); frame.add(b);
+  }
+  const lampRig = new THREE.Group(), bulbMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(4, 3.2, 2.3) });
+  const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.045, 20, 12), bulbMat);
+  const shade = new THREE.Mesh(new THREE.ConeGeometry(0.15, 0.17, 28, 1, true).translate(0, 0.02, 0), new THREE.MeshStandardMaterial({ color: 0x2a2e33, roughness: 0.5, metalness: 0.6, side: THREE.DoubleSide }));
+  const cord = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 8).translate(0, 4.1, 0), dark);
+  const sunLight = new THREE.DirectionalLight(0xffffff, 2.5), lampLight = new THREE.PointLight(0xffd9a0, 12, 0, 2), hemi = new THREE.HemisphereLight(0xbcd2ea, 0x3a3f44, 0.9);
+  lampRig.add(bulb, shade, cord, lampLight);
+  // the rubber duck: its body and beak (meshed at the start), and two eyes with pupils
+  const plastic = (r, g, b, roughness) => new THREE.MeshStandardMaterial({ color: new THREE.Color(r, g, b), roughness });
+  const yellow = plastic(0.92, 0.6, 0.012, 0.3), duckMesh = new THREE.Group();
+  yellow.emissive.set(0x3d2300);   // vinyl lets a little light through: warm, even in the shade
+  for (const [{ P, N, I }, m] of [[nets[0], yellow], [nets[1], plastic(0.95, 0.2, 0.01, 0.3)]]) {
+    const g = new THREE.BufferGeometry().setIndex(I);
+    duckMesh.add(new THREE.Mesh(g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3)).setAttribute('normal', new THREE.Float32BufferAttribute(N, 3)), m));
+  }
+  // each eye: a white ball, and its pupil a black cap on it (where the ball is within 0.032 of a point
+  // just inside it, as pupil() says: 0.6 rad round the direction to that point), drawn just in front of it
+  const white = plastic(0.82, 0.82, 0.82, 0.1), black = plastic(0.006, 0.006, 0.006, 0.1);
+  Object.assign(black, { polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4 });
+  for (const sz of [1, -1]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(EYE[3] * DS, 40, 28), white), cap = new THREE.Mesh(new THREE.SphereGeometry(EYE[3] * DS * 1.004, 40, 8, 0, 2 * Math.PI, 0, 0.6), black);
+    cap.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0.03, 0.006, 0.022 * sz).normalize());
+    eye.position.set(EYE[0] * DS, EYE[1] * DS, sz * EYE[2] * DS); eye.add(cap); duckMesh.add(eye);
+  }
+  const duckMeshes = [duckMesh,...Array.from({length:MAX_DUCKS-1},()=>duckMesh.clone())];   // shared body, beak and eyes for all fifty ducks
+  scene.add(skyDome, floor, surface, ...duckMeshes, sunLight, hemi);
+  // Reconstruct the parcel density as an optically shaded 3D free surface.
+  const fluidGeometry=new THREE.BufferGeometry();fluidGeometry.setAttribute('position',new THREE.BufferAttribute(splashFluid.positions,3).setUsage(THREE.DynamicDrawUsage));fluidGeometry.setAttribute('normal',new THREE.BufferAttribute(splashFluid.normals,3).setUsage(THREE.DynamicDrawUsage));
+  const fluidMaterial=mat(`void main(){vec3 n=normalize(vNrm),d=normalize(vPos-cameraPosition);if(dot(n,d)>0.)n=-n;float F=fresnel(-dot(n,d));vec3 t=refract(d,n,1./IOR);vec3 col=mix(water(vPos,t),look(vPos,reflect(d,n)),F);gl_FragColor=vec4(col,.88);
+${OUT}
+}`,{side:THREE.DoubleSide,transparent:true,depthWrite:true,vertexShader:'varying vec3 vPos;varying vec3 vNrm;void main(){vPos=position;vNrm=normal;gl_Position=projectionMatrix*viewMatrix*vec4(position,1.);}'});
+  const fluidMesh=new THREE.Mesh(fluidGeometry,fluidMaterial);fluidMesh.frustumCulled=false;fluidMesh.renderOrder=3;scene.add(fluidMesh);
+  function updateCrowns(){fluidGeometry.setDrawRange(0,splashFluid.vertices);fluidMesh.visible=splashFluid.vertices>0;if(splashFluid.changed){fluidGeometry.attributes.position.needsUpdate=true;fluidGeometry.attributes.normal.needsUpdate=true;}}
+
+  const underCam = new THREE.PerspectiveCamera(10, 1, 0.5, 2000), underBack = new THREE.Color(0x4f9fb4);
+  const tipQ = new THREE.Quaternion(), tipE = new THREE.Euler(), tipV = new THREE.Vector3(), tipS = new THREE.Vector3(1, 1, 1), tipP = new THREE.Vector3(), tipC = new THREE.Quaternion();
+  if (OUTSIDE) { scene.add(sides, glass, frame); controls.enabled = true; controls.minDistance = Math.hypot(TX, TZ, TOP) + 0.4; controls.maxDistance = Math.max(14, 3 * controls.minDistance); floor.matrixAutoUpdate = skyDome.matrixAutoUpdate = false; }   // the glass tank on its floor; drag to walk around it, wheel to zoom; the camera stays outside the glass
+  else if (SWE_ON) { floor.visible=true;floor.material=mat('void main(){gl_FragColor=vec4(dryFloor(vPos),1.);\n'+OUT+'}');camera.near=.5; }   // the water box fills the screen: no ground around it (and no flicker where its dry floor meets it)
+  if (TANK_MODE) {   // the fish tank: its tiled back and side walls, the water behind the front glass, the glass and its edges, on a purple backdrop
+    const walls = new THREE.Group(), wallMat = mat('void main() { gl_FragColor = vec4(wallColor(vPos), 1.0);\n' + OUT + '}', { side: THREE.DoubleSide });
+    const back = new THREE.Mesh(new THREE.PlaneGeometry(2.2 * TX, 1.1 * TOP).translate(0, 0.55 * TOP, -TZ), wallMat);
+    for (const sx of [-1, 1]) walls.add(new THREE.Mesh(new THREE.PlaneGeometry(2 * TZ, TOP).rotateY(Math.PI / 2).translate(sx * TX, TOP / 2, 0), wallMat));
+    walls.add(back);
+    scene.add(walls, sides);   // no glass or edges drawn: the screen's own edges are the tank's
+    skyDome.visible = floor.visible = false;
+    scene.background = new THREE.Color(0xe6e8ec);   // pale, like the tiles, so no strip shows if the back wall falls short of an edge
+  }
+
+  // clicks on the water make ripples (and push the duck)
+  const ray = new THREE.Raycaster(), plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -LEVEL), hit = new THREE.Vector3();
+  let down = null;
+  const drawing=new Set();
+  function stroke(ev){const r=canvas.getBoundingClientRect();
+    if(OUTSIDE)return;   // outside, dragging turns the view instead
+    ray.setFromCamera(new THREE.Vector2((ev.clientX-r.left)/r.width*2-1,1-(ev.clientY-r.top)/r.height*2),camera);if(ray.ray.intersectPlane(plane,hit)&&Math.abs(hit.x)<TX&&Math.abs(hit.z)<TZ)poke(hit.x,hit.z);
+    else if(TANK_MODE&&ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0,0,1),-TZ),hit)&&Math.abs(hit.x)<TX&&hit.y<LEVEL)poke(hit.x,TZ*0.6);}   // fish tank: a tap on the front glass below the water splashes just behind it
+  canvas.addEventListener('pointerdown',ev=>{if(OUTSIDE)return;drawing.add(ev.pointerId);canvas.setPointerCapture(ev.pointerId);stroke(ev);});
+  canvas.addEventListener('pointermove',ev=>{if(drawing.has(ev.pointerId))stroke(ev);});
+  for(const name of ['pointerup','pointercancel','lostpointercapture'])canvas.addEventListener(name,ev=>drawing.delete(ev.pointerId));
+  canvas.addEventListener('pointerup', (ev) => {
+    if (!OUTSIDE) return; // Top view already splashed on pointerdown; avoid a duplicate impact.
+    if (!down || Math.hypot(ev.clientX - down[0], ev.clientY - down[1]) > 6 || performance.now() - down[2] > 500) return;
+    const r = canvas.getBoundingClientRect();
+    ray.setFromCamera(new THREE.Vector2((ev.clientX - r.left) / r.width * 2 - 1, 1 - (ev.clientY - r.top) / r.height * 2), camera);
+    if (ray.ray.intersectPlane(plane, hit) && Math.abs(hit.x) < TX && Math.abs(hit.z) < TZ) poke(hit.x, hit.z);
+  });
+
+  let simAcc = 0; const size = new THREE.Vector2();
+  return {
+    name: 'GPU · three.js r' + THREE.REVISION, minScale: Math.min(1,G.ratio), maxScale: G.ratio, target: G.fps, controls,
+    dropHeight(){return 3*Math.max(.9,Math.min(2.8,(camera.position.y-LEVEL)*.68));},
+    airHeight(h){const safe=Math.max(.4,(camera.position.y-LEVEL)*.7);return safe*(1-Math.exp(-h/safe));},
+    project(p){const v=new THREE.Vector3(p.x,p.y,p.z),distance=camera.position.distanceTo(v);v.project(camera);return [(v.x*.5+.5)*canvas.clientWidth,(.5-v.y*.5)*canvas.clientHeight,canvas.clientHeight/(2*Math.tan(camera.fov*Math.PI/360)*Math.max(.1,distance))];},
+    viewYaw() { return Math.atan2(camera.position.x - TARGET[0], camera.position.z - TARGET[2]); },   // which way round the tank the camera stands
+    setTilt(x, z) { U.uTilt.value.set(x, z); },
+    setBottle(on) { U.uBottle.value = on ? 1 : 0; },
+    setPlain(on) { U.uPlain.value = on ? 1 : 0; },
+    setTiles(n) { U.uTiles.value = n; },
+    setSwe(sw) {   // the shallow water's depths, to the GPU as half floats
+      const d = sweTex.image.data, hh = sw.h; for (let k = 0; k < hh.length; k++) d[k] = THREE.DataUtils.toHalfFloat(hh[k]);
+      sweTex.needsUpdate = true;
+    },
+    duckScreenBounds(){
+      duckMesh.updateMatrixWorld(true);const box=new THREE.Box3().setFromObject(duckMesh),points=[];
+      for(const x of [box.min.x,box.max.x])for(const y of [box.min.y,box.max.y])for(const z of [box.min.z,box.max.z])points.push(new THREE.Vector3(x,y,z).project(camera));
+      return {left:Math.min(...points.map(p=>p.x)),right:Math.max(...points.map(p=>p.x)),top:Math.max(...points.map(p=>p.y)),bottom:Math.min(...points.map(p=>p.y))};
+    },
+    setView(yaw, pitch, dist) { camera.position.set(TARGET[0] + dist * Math.cos(pitch) * Math.sin(yaw), TARGET[1] + dist * Math.sin(pitch), TARGET[2] + dist * Math.cos(pitch) * Math.cos(yaw)); controls.update(); },
+    draw(dt, L) {
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      if (renderer.getPixelRatio() !== state.scale) renderer.setPixelRatio(state.scale);
+      if (renderer.getSize(size).x !== w || size.y !== h) renderer.setSize(w, h, false);
+      if (OUTSIDE) {
+        camera.aspect = w / Math.max(1, h); camera.fov = FOV; camera.updateProjectionMatrix(); controls.update();
+        visibleBounds.x = Math.max(0.02, TX - 1.15 * DS - 0.04); visibleBounds.z = Math.max(0.02, TZ - 1.15 * DS - 0.04);
+        DUCKS.forEach(constrainDuck);
+      } else if (TANK_MODE) {
+        // The front glass is the screen: seen straight on from far away (almost flat), its edges on the screen's edges.
+        const D = 8 * TOP, eye = TOP / 2, n = camera.near, half = TOP * w / Math.max(1, h) / 2;
+        camera.up.set(0, 1, 0); camera.position.set(0, eye, TZ + D); camera.lookAt(0, eye, 0);
+        camera.projectionMatrix.makePerspective(-half * n / D, half * n / D, (TOP - eye) * n / D, -eye * n / D, n, camera.far);
+        camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
+        visibleBounds.x = Math.max(0.02, TX - 1.15 * DS - 0.04); visibleBounds.z = Math.max(0.02, TZ - 1.15 * DS - 0.04);
+        DUCKS.forEach(constrainDuck);
+      } else {
+      camera.aspect = w / Math.max(1, h);
+      camera.fov = 2 * Math.atan(Math.tan((SWE_ON ? 10 : FOV) * Math.PI / 360) / Math.min(1, camera.aspect)) * 180 / Math.PI;   // the water box is seen from far above, almost flat, so its edges stay on the screen's edges even where the water piles up   // portrait: keep the tank's width
+      const viewTan=Math.tan(camera.fov*Math.PI/360);
+      const distance=(SWE_ON?.97:.82)*Math.min(TZ/viewTan,TX/(viewTan*camera.aspect));
+      camera.position.set(0,LEVEL+distance,0);camera.lookAt(0,LEVEL,0);
+      camera.updateProjectionMatrix();
+      const duckTop=1.5*DS+Math.max(0,DUCK.y)+.08;
+      const safeDistance=Math.max(.05,distance-duckTop),margin=1.15*DS+.04;
+      visibleBounds.x=Math.max(.02,safeDistance*viewTan*camera.aspect-margin);
+      visibleBounds.z=Math.max(.02,safeDistance*viewTan-margin);
+      DUCKS.forEach(constrainDuck);camera.lookAt(0,LEVEL,0);
+      }
+      // the ripple simulation steps at 60 Hz, moving the duck and taking up to 8 waiting splashes per step
+      for (simAcc = Math.min(simAcc + dt, 0.1); simAcc >= 1 / 60; simAcc -= 1 / 60) {
+        let n = 0;
+        for (const D of DUCKS) { if (!D.on) continue; const [a, b] = duckStep(1 / 60, state.turb, D); hullA.set(a, 4 * n); hullB.set(b, 4 * n); n++; }
+        separateDucks(); sim.material.uniforms.uHullN.value = n;
+        for (let i = 0; i < 8; i++) dropU.set(drops.length ? drops.shift() : [0, 0, 1, 0], i * 4);
+        gpu.compute();
+      }
+      U.uTime.value = state.t; U.uLamp.value = L.lamp ? 1 : 0; U.uDay.value = L.day;
+      U.uLight.value.set(...L.pos); U.uLightCol.value.set(...L.col); U.uAmb.value.set(...L.amb); U.uGlow.value.set(...L.glow);
+      U.uSim.value = gpu.getCurrentRenderTarget(sim).texture;
+      gpu.doRenderTarget(surfMat, surfRT); U.uSurf.value = surfRT.texture;
+      buoyElapsed+=dt;
+      if(buoyElapsed>=1/30){buoyElapsed=0;DUCKS.forEach((D,i)=>buoyDucks.set([D.x,D.z,D.head,D.on?1:0],i*4));
+        renderer.setRenderTarget(buoyTarget);renderer.render(buoyScene,buoyCamera);
+        renderer.readRenderTargetPixels(buoyTarget,0,0,50,1,buoyPixels);renderer.setRenderTarget(null);
+        DUCKS.forEach((D,i)=>{if(Number.isFinite(buoyPixels[i*4])){D.surface=[buoyPixels[i*4],buoyPixels[i*4+1],buoyPixels[i*4+2]];keepAfloat(D);}});
+      }
+      let nd = 0;
+      DUCKS.forEach((D, i) => {   // the ducks that are in, packed first for the shaders; the flat base of each is under the water line
+        const m = duckMeshes[i], dy = LEVEL + duckRenderY(D) - DRAFT;
+        m.visible = D.on; if (!D.on) return;
+        U.uDucks.value.set([D.x, dy, D.z, D.head], 4 * nd++);
+        m.rotation.set(D.roll,-D.head,D.pitch,'YZX');const pivot=new THREE.Vector3(0,.5*DS,0).applyQuaternion(m.quaternion);m.position.set(D.x-pivot.x,dy+.5*DS-pivot.y,D.z-pivot.z);
+      });
+      U.uDuckCount.value = nd;
+      updateCrowns();
+      // redraw the caustics, then the scene
+      U.uCaus.value = null;
+      renderer.setRenderTarget(causRT); renderer.setClearColor(0x000000, 0); renderer.clear(); renderer.render(causScene, flatCam);
+      renderer.setRenderTarget(null); U.uCaus.value = causRT.texture;
+      lampRig.visible = lampLight.visible = L.lamp; sunLight.visible = !L.lamp;
+      if (L.lamp) lampRig.position.set(...L.pos); else sunLight.position.set(...L.pos).multiplyScalar(10);
+      hemi.intensity = L.lamp ? 0.05 : 1.3 * L.day;
+      if (UNDER.on) {   // upside down: seen from the screen, under the water, looking up through it (screen right stays the device's right)
+        underCam.aspect = w / Math.max(1, h);
+        underCam.fov = 2 * Math.atan(Math.tan(10 * Math.PI / 360) / Math.min(1, underCam.aspect)) * 180 / Math.PI;
+        const vt = Math.tan(underCam.fov * Math.PI / 360), dist = 0.9 * Math.min(TZ / vt, TX / (vt * underCam.aspect));
+        underCam.position.set(0, -dist, 0); underCam.up.set(0, 0, 1); underCam.lookAt(0, 0, 0); underCam.updateProjectionMatrix();
+        const hide = [floor, skyDome, sides, glass, frame], was = hide.map(o => o.visible);
+        hide.forEach(o => o.visible = false); U.uUnder.value = 1;
+        const ground = hemi.groundColor.getHex(), back = scene.background, glow = hemi.intensity; hemi.groundColor.setHex(0xbfeef2); hemi.intensity = 2.4;   // the ducks' undersides are lit by the bright water around them
+        scene.background = underBack;   // where the piled-up water's edge leaves a gap, it is the same water colour, not black
+        renderer.render(scene, underCam);
+        hide.forEach((o, i) => o.visible = was[i]); U.uUnder.value = 0; hemi.groundColor.setHex(ground); hemi.intensity = glow; scene.background = back;
+      } else if (OUTSIDE) {   // the tank tips over on its table the way the box is pushed. Its water is worked out with the tank level,
+        // so the table, the sky and the camera are tipped the other way round it instead: on the screen that is the same picture
+        const [px, pz, g] = SWE_PUSH, ax = Math.atan2(pz, g), az = -Math.atan2(px, g);
+        tipQ.setFromEuler(tipE.set(ax, 0, az)).invert();   // from the table to the tank
+        const drop = TX * Math.abs(Math.sin(az)) + TZ * Math.abs(Math.sin(ax));   // the table sits under the tank's lowest corner
+        floor.matrix.compose(tipV.set(0, -drop, 0).applyQuaternion(tipQ), tipQ, tipS); skyDome.matrix.makeRotationFromQuaternion(tipQ);
+        floor.matrixWorld.copy(floor.matrix); skyDome.matrixWorld.copy(skyDome.matrix);
+        tipP.copy(camera.position); tipC.copy(camera.quaternion);
+        camera.position.applyQuaternion(tipQ); camera.quaternion.premultiply(tipQ); camera.updateMatrixWorld(true);
+        renderer.render(scene, camera);
+        camera.position.copy(tipP); camera.quaternion.copy(tipC); camera.updateMatrixWorld(true);
+      } else
+      renderer.render(scene, camera);
+    },
+  };
+}
+
+// ================================================================= CPU renderer: the same scene in JavaScript
+// Per frame the waves (and a coarse ripple simulation) are sampled once on a grid over the tank, and
+// the caustics once on a grid over the floor; every pixel then looks those up.
+function cpuRenderer(canvas) {
+  // Material choices work even on devices which cannot create a WebGL context.
+  const picker=$('causticMaterial'),caps=new Map();let selected=null;
+  for(const look of WATER_MATERIALS){
+    if(![...picker.options].some(o=>o.value===look.id)){const option=document.createElement('option');option.value=look.id;option.textContent=look.name;picker.append(option);}
+    const image=new Image();image.onload=()=>{const c=document.createElement('canvas');c.width=c.height=128;const context=c.getContext('2d');context.drawImage(image,0,0,128,128);caps.set(look.id,context.getImageData(0,0,128,128).data);};image.src='../matcaps/'+look.id+'.png';
+  }
+  try{const saved=localStorage.getItem('water.boxMaterial');if([...picker.options].some(o=>o.value===saved))picker.value=saved;}catch{}
+  const choose=()=>{selected=picker.value==='clear'?null:picker.value;try{localStorage.setItem('water.boxMaterial',picker.value);}catch{}};
+  picker.onchange=choose;choose();
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  const low = document.createElement('canvas'), lctx = low.getContext('2d');
+  const GX = 96, GZ = 60, grid = new Float32Array(GX * GZ * 3);   // height and slope, 3.8 cm apart
+  let rip = new Float32Array(GX * GZ), old = new Float32Array(GX * GZ), simAcc = 0;   // ripples (mm)
+  const CX = 128, CZ = 80, caus = new Float32Array(CX * CZ * 3);  // light on the floor (rgb)
+  const LUT = new Uint8ClampedArray(2048);                         // tone curve, indexed by sqrt(linear / 16)
+  for (let i = 0; i < 2048; i++) { const x = (i / 2047) ** 2 * 16; LUT[i] = 255 * Math.min(1, x * (2.51 * x + 0.03) / (x * (2.43 * x + 0.59) + 0.14)) ** (1 / 2.2); }
+  let img = null, L, cam, hRes = 1;
+  const w3 = [0, 0, 0], w5 = [0, 0, 0, 0, 0], v = [0, 0, 0], c = [0, 0, 0], c2 = [0, 0, 0], ev = [0, 0, 0], dn = [0, 0, 0];
+  let part = 0;   // what of the duck duckSDF() found nearest: 0 body, 1 beak, 2 eye, 3 pupil
+  const view = { yaw: 0.62, pitch: 0.34, dist: 6.4 };
+
+  function stepRipples([a, b]) {   // the wave equation on a coarse grid, with the waiting splashes and the duck's hull (before, after)
+    const b1 = [b[0], b[1], b[2], 1];
+    for (const [x, z, r, hh] of drops.splice(0)) for (let j = 0; j < GZ; j++) for (let i = 0; i < GX; i++) {
+      const qx = ((i / (GX - 1)) * 2 - 1) * TX - x, qz = ((j / (GZ - 1)) * 2 - 1) * TZ - z, r2 = Math.max(r, 0.05) ** 2;
+      rip[j * GX + i] += hh * Math.exp(-(qx * qx + qz * qz) / r2);
+    }
+    for (let j = 0; j < GZ; j++) for (let i = 0; i < GX; i++) {
+      const k = j * GX + i, n = rip[k - (j > 0 ? GX : 0)] + rip[k + (j < GZ - 1 ? GX : 0)] + rip[k - (i > 0 ? 1 : 0)] + rip[k + (i < GX - 1 ? 1 : 0)];
+      const x = (i / (GX - 1) * 2 - 1) * TX, z = (j / (GZ - 1) * 2 - 1) * TZ;
+      old[k] = ((n * 0.5 - old[k]) * 0.985 + PUSH * (hull(x, z, a) - hull(x, z, b))) * (1 - 0.35 * hull(x, z, b1));   // held still under the hull
+    }
+    [rip, old] = [old, rip];
+  }
+  function duckSDF(x, y, z) {   // the whole duck (duck units): distance, and part
+    let d = duckBody(x, y, z), b = duckBeak(x, y, z); part = 0;
+    if (b < d) { d = b; part = 1; }
+    const ex = x - EYE[0], ey = y - EYE[1], ez = Math.abs(z) - EYE[2], e = Math.sqrt(ex * ex + ey * ey + ez * ez) - EYE[3];
+    if (e < d) { d = e; part = pupil(x, y, z) ? 3 : 2; }
+    return d;
+  }
+  function duckHitOne(ox, oy, oz, dx, dy, dz,DUCK) {   // as duck() in the shader, for the whole duck: distance (0 inside, 1e9 on a miss); normal -> dn
+    if (!DUCK.on) return 1e9;
+    const heading=DUCK.head,p=DUCK.pitch,r=DUCK.roll,ch=Math.cos(heading),sh=Math.sin(heading),cp=Math.cos(p),sp=Math.sin(p),cr=Math.cos(r),sr=Math.sin(r);
+    const basis=[ch*cp,sp,sh*cp,-ch*sp*cr-sh*sr,cp*cr,-sh*sp*cr+ch*sr,ch*sp*sr-sh*cr,-cp*sr,sh*sp*sr+ch*cr];
+    const qx=(ox-DUCK.x)/DS,qy=(oy-LEVEL-duckRenderY(DUCK)+DRAFT)/DS-.5,qz=(oz-DUCK.z)/DS;
+    const o0=qx*basis[0]+qy*basis[1]+qz*basis[2],oy1=qx*basis[3]+qy*basis[4]+qz*basis[5]+.5,o2=qx*basis[6]+qy*basis[7]+qz*basis[8];
+    const d0=dx*basis[0]+dy*basis[1]+dz*basis[2],dy1=dx*basis[3]+dy*basis[4]+dz*basis[5],d2=dx*basis[6]+dy*basis[7]+dz*basis[8];
+    const cx = o0 - 0.05, cy = oy1 - 0.53, b = cx * d0 + cy * dy1 + o2 * d2, h = b * b - (cx * cx + cy * cy + o2 * o2) + 0.9;   // a ball round it
+    if (h < 0) return 1e9;
+    for (let t = Math.max(-b - Math.sqrt(h), 0), i = 0; i < 48 && t < Math.sqrt(h) - b; i++) {
+      const px = o0 + d0 * t, py = oy1 + dy1 * t, pz = o2 + d2 * t, e = duckSDF(px, py, pz);
+      if (e < 0.003) {
+        const k = part, g = 0.003, nx = duckSDF(px + g, py, pz) - duckSDF(px - g, py, pz), ny = duckSDF(px, py + g, pz) - duckSDF(px, py - g, pz), nz = duckSDF(px, py, pz + g) - duckSDF(px, py, pz - g);
+        const wx=nx*basis[0]+ny*basis[3]+nz*basis[6],wy=nx*basis[1]+ny*basis[4]+nz*basis[7],wz=nx*basis[2]+ny*basis[5]+nz*basis[8],l=Math.hypot(wx,wy,wz)||1;
+        dn[0] = wx / l; dn[1] = wy / l; dn[2] = wz / l; part = k;
+        return t * DS;
+      }
+      t += e;
+    }
+    return 1e9;
+  }
+  let hitDuck=DUCK;
+  function duckHit(ox,oy,oz,dx,dy,dz){let best=1e9,bestPart=0,bestNormal=[0,1,0];
+    for(const D of DUCKS){if(!D.on)continue;const t=duckHitOne(ox,oy,oz,dx,dy,dz,D);if(t<best){best=t;bestPart=part;bestNormal=dn.slice();hitDuck=D;}}
+    part=bestPart;dn.splice(0,3,...bestNormal);return best;
+  }
+  function duckColor(px, py, pz, o) {   // the duck's plastic at a point of it, normal dn: in the light above the water, dimmer below
+    const E = incoming(px, py, pz), below = LEVEL + duckRenderY(hitDuck) - py, nl = -(dn[0] * ev[0] + dn[1] * ev[1] + dn[2] * ev[2]);
+    const Y = [[0.92, 0.6, 0.012], [0.95, 0.2, 0.01], [0.82, 0.82, 0.82], [0.006, 0.006, 0.006]][part];
+    for (let n = 0; n < 3; n++) o[n] = Y[n] / Math.PI * (below > 0 ? L.col[n] * E * (0.1 + 0.3 * (0.5 + 0.5 * dn[1])) * Math.exp(-ABSORB[n] * below) + L.amb[n] * 0.5 : L.col[n] * E * Math.max(nl, 0) + L.amb[n]);
+  }
+  function surf(x, z) {   // bilinear lookup of height and slope -> w3
+    const gu = Math.min(Math.max((x / TX + 1) * 0.5 * (GX - 1), 0), GX - 1.001), gv = Math.min(Math.max((z / TZ + 1) * 0.5 * (GZ - 1), 0), GZ - 1.001);
+    const i = gu | 0, j = gv | 0, fu = gu - i, fv = gv - j, k = (j * GX + i) * 3, k2 = k + GX * 3;
+    for (let n = 0; n < 3; n++) w3[n] = (grid[k + n] * (1 - fu) + grid[k + 3 + n] * fu) * (1 - fv) + (grid[k2 + n] * (1 - fu) + grid[k2 + 3 + n] * fu) * fv;
+  }
+  function refract(ix, iy, iz, nx, ny, nz, eta) {   // -> v; false on total internal reflection
+    const d = nx * ix + ny * iy + nz * iz, k = 1 - eta * eta * (1 - d * d), m = eta * d + Math.sqrt(k);
+    if (k < 0) return false;
+    v[0] = eta * ix - m * nx; v[1] = eta * iy - m * ny; v[2] = eta * iz - m * nz; return true;
+  }
+  const fresnel = (cs) => { const m = 1 - Math.min(Math.max(cs, 0), 1), m2 = m * m; return 0.02 + 0.98 * m2 * m2 * m; };
+  const smooth = (a, b, x) => { const t = Math.min(Math.max((x - a) / (b - a), 0), 1); return t * t * (3 - 2 * t); };
+  function surfNormal(x, z) { surf(x, z); const l = Math.sqrt(w3[1] * w3[1] + 1 + w3[2] * w3[2]); v[0] = -w3[1] / l; v[1] = 1 / l; v[2] = -w3[2] / l; }
+  function incoming(x, y, z) {   // direction of the light arriving at (x, y, z) -> ev, returns its irradiance factor
+    if (!L.lamp) { ev[0] = -L.pos[0]; ev[1] = -L.pos[1]; ev[2] = -L.pos[2]; return 1; }
+    const dx = x - L.pos[0], dy = y - L.pos[1], dz = z - L.pos[2], r2 = dx * dx + dy * dy + dz * dz, l = Math.sqrt(r2);
+    ev[0] = dx / l; ev[1] = dy / l; ev[2] = dz / l;
+    return smooth(0.35, 0.75, -ev[1]) / r2;
+  }
+  let lx = 0, lz = 0, lE = 0, lt = 0;
+  function land(x, z) {   // where the light through surface point (x, z) lands on the floor -> lx, lz; lE, lt: its strength, path in water
+    surfNormal(x, z); const nx = v[0], ny = v[1], nz = v[2], y = LEVEL + w3[0];
+    lE = incoming(x, y, z) * Math.max(-ev[1], 0) * (1 - fresnel(-(ev[0] * nx + ev[1] * ny + ev[2] * nz)));
+    refract(ev[0], ev[1], ev[2], nx, ny, nz, 1 / IOR);
+    lt = y / Math.max(-v[1], 0.05); lx = x + v[0] * lt; lz = z + v[2] * lt;
+    lE *= 0.2 + 0.8 * duckClear(x, y, z, -ev[0], -ev[1], -ev[2]) * duckClear(x, y, z, v[0], v[1], v[2]);   // the duck's shadow
+  }
+  function duckClear(px, py, pz, dx, dy, dz) {   // as duckClear() in the shader
+    if (!DUCK.on) return 1;
+    const f0 = Math.cos(DUCK.head), f1 = Math.sin(DUCK.head), qx = (px - DUCK.x) / DS, qy = (py - LEVEL - DUCK.y + DRAFT) / DS, qz = (pz - DUCK.z) / DS;
+    const o0 = qx * f0 + qz * f1, o2 = qz * f0 - qx * f1, e0 = dx * f0 + dz * f1, e2 = dz * f0 - dx * f1;
+    const pass = (a0, a1, a2, b0, b1, b2) => { const s = Math.max(-(a0 * b0 + a1 * b1 + a2 * b2) / (b0 * b0 + b1 * b1 + b2 * b2), 0); return smooth(0.7, 1.35, Math.hypot(a0 + b0 * s, a1 + b1 * s, a2 + b2 * s)); };
+    return pass(o0 / 0.5, (qy - 0.28) / 0.3, o2 / 0.37, e0 / 0.5, dy / 0.3, e2 / 0.37)                    // the body
+         * pass((o0 - 0.25) / 0.25, (qy - 0.8) / 0.25, o2 / 0.25, e0 / 0.25, dy / 0.25, e2 / 0.25);        // the head
+  }
+  function prepare(dt) {
+    simAcc = Math.min(simAcc + dt, 0.2);
+    while (simAcc >= 1 / 22) { simAcc -= 1 / 22; const states=DUCKS.filter(d=>d.on).map(d=>duckStep(1/22,state.turb,d));stepRipples(states[0]||[[0,0,0,0],[0,0,0,0]]);separateDucks(); }   // coarser cells: fewer steps for the same wave speed
+    const sx = (GX - 1) / (4 * TX) * 0.001, sz = (GZ - 1) / (4 * TZ) * 0.001;   // central differences, mm -> m
+    for (let j = 0; j < GZ; j++) for (let i = 0; i < GX; i++) {
+      const k = j * GX + i;
+      waveAt((i / (GX - 1) * 2 - 1) * TX, (j / (GZ - 1) * 2 - 1) * TZ, w5);
+      grid[k * 3] = w5[0] + 0.001 * rip[k];
+      grid[k * 3 + 1] = w5[1] + (rip[i < GX - 1 ? k + 1 : k] - rip[i > 0 ? k - 1 : k]) * sx;
+      grid[k * 3 + 2] = w5[2] + (rip[j < GZ - 1 ? k + GX : k] - rip[j > 0 ? k - GX : k]) * sz;
+    }
+    for (let j = 0; j < CZ; j++) for (let i = 0; i < CX; i++) {   // find the surface point lighting each floor cell, compare areas
+      const qx = ((i + 0.5) / CX * 2 - 1) * TX, qz = ((j + 0.5) / CZ * 2 - 1) * TZ;
+      land(qx, qz); let px = 2 * qx - lx, pz = 2 * qz - lz;
+      land(px, pz); px += qx - lx; pz += qz - lz;
+      land(px + 0.01, pz); const ax = lx, az = lz;
+      land(px, pz + 0.01); const bx = lx, bz = lz;
+      land(px, pz);
+      const ratio = Math.min(1e-4 / Math.max(Math.abs((ax - lx) * (bz - lz) - (az - lz) * (bx - lx)), 1e-7), 10), k = (j * CX + i) * 3;
+      for (let n = 0; n < 3; n++) caus[k + n] = lE * ratio * Math.exp(-ABSORB[n] * lt);
+    }
+  }
+  function causticAt(x, z, o) {
+    const u = Math.min(Math.max((x / TX + 1) * 0.5 * CX - 0.5, 0), CX - 1.001), w = Math.min(Math.max((z / TZ + 1) * 0.5 * CZ - 0.5, 0), CZ - 1.001);
+    const i = u | 0, j = w | 0, fu = u - i, fv = w - j, k = (j * CX + i) * 3, kk = k + CX * 3;
+    for (let n = 0; n < 3; n++) o[n] = (caus[k + n] * (1 - fu) + caus[k + 3 + n] * fu) * (1 - fv) + (caus[kk + n] * (1 - fu) + caus[kk + 3 + n] * fu) * fv;
+  }
+  function sky(dx, dy, dz, o, disk = 1) {
+    if (L.lamp) { const m = 1.2 - 0.6 * Math.min(Math.max(dy, 0), 1); o[0] = 0.01 * m; o[1] = 0.014 * m; o[2] = 0.026 * m; return; }
+    const s = dx * L.pos[0] + dy * L.pos[1] + dz * L.pos[2], m = Math.sqrt(Math.min(Math.max(dy, 0), 1)), d = L.day;
+    const g1 = Math.max(s, 0), g4 = g1 * g1 * g1 * g1, g8 = g4 * g4;
+    const glow = g8 * g8 * g8 * 0.12 + g4 * 0.05 * (1 - Math.abs(dy)) + (disk ? (s > 0.99985 ? Math.min(1, (s - 0.99985) / 1e-4) * 60 : 0) : g1 ** 900 * 7);
+    o[0] = (0.56 - 0.41 * m) * d + L.col[0] * glow; o[1] = (0.67 - 0.35 * m) * d + L.col[1] * glow; o[2] = (0.8 - 0.12 * m) * d + L.col[2] * glow;
+  }
+  function look(px, py, pz, dx, dy, dz, o) {   // sky, and the lamp's bulb
+    sky(dx, dy, dz, o, 0);
+    if (!L.lamp) return;
+    const bx = L.pos[0] - px, by = L.pos[1] - py, bz = L.pos[2] - pz, b2 = bx * bx + by * by + bz * bz, s = smooth(0.998, 0.9997, (dx * bx + dy * by + dz * bz) / Math.sqrt(b2)) * 1.5 / Math.max(1, b2);
+    for (let n = 0; n < 3; n++) o[n] += L.col[n] * s;
+  }
+  function boxHit(ox, oy, oz, dx, dy, dz) {   // -> [tin, tout, entry-face axis]
+    const ax = (-TX - ox) / dx, bx = (TX - ox) / dx, ay = -oy / dy, by = (TOP - oy) / dy, az = (-TZ - oz) / dz, bz = (TZ - oz) / dz;
+    const nx = Math.min(ax, bx), ny = Math.min(ay, by), nz = Math.min(az, bz), tin = Math.max(nx, ny, nz);
+    return [tin, Math.min(Math.max(ax, bx), Math.max(ay, by), Math.max(az, bz)), tin === nx ? 0 : tin === ny ? 1 : 2];
+  }
+  function dryFloorColor(x,z,o){const tiles=+$('boxTiles').value||24,gx=Math.abs(x*tiles-Math.floor(x*tiles)-.5),gz=Math.abs(z*tiles-Math.floor(z*tiles)-.5),g=smooth(.43,.47,Math.max(gx,gz));for(let n=0;n<3;n++)o[n]=([.78,.83,.82][n]*(1-g)+[.36,.43,.45][n]*g)/Math.PI*(L.col[n]*.65+L.amb[n]);}
+  function ground(px, pz, o) {
+    if(!OUTSIDE){dryFloorColor(px,pz,o);return;}
+    const cx = px - cam.pos[0], cz = pz - cam.pos[2], hd = Math.sqrt(cx * cx + cz * cz), dist = Math.sqrt(hd * hd + cam.pos[1] * cam.pos[1]);
+    const pix = dist * cam.tan * 2 / hRes, e = 0.5 - Math.max(Math.abs(px - Math.floor(px) - 0.5), Math.abs(pz - Math.floor(pz) - 0.5));
+    const line = (1 - Math.min(Math.max((e - 0.01) / pix, 0), 1)) * Math.min(1, 0.012 / pix);
+    const alb = (0.2 + 0.03 * ((Math.floor(px) + Math.floor(pz)) & 1)) * (1 - 0.45 * line) / Math.PI;
+    const E = incoming(px, 0, pz), ly = -ev[1], b = boxHit(px, 0, pz, -ev[0], -ev[1], -ev[2]), through = b[1] > Math.max(b[0], 0), len = b[1] - Math.max(b[0], 0);
+    const fog = 1 - Math.exp(-0.018 * dist);
+    sky(cx / hd, 0, cz / hd, c2, 0);
+    for (let n = 0; n < 3; n++) o[n] = alb * (L.col[n] * E * Math.max(ly, 0) * (through ? 0.7 * Math.exp(-ABSORB[n] * 0.7 * len) : 1) + L.amb[n]) * (1 - fog) + c2[n] * fog;
+  }
+  function background(px, py, pz, dx, dy, dz, o) { if (dy < 0) { const t = -py / dy; ground(px + dx * t, pz + dz * t, o); } else look(px, py, pz, dx, dy, dz, o); }
+  function surfaceT(ox, oy, oz, dx, dy, dz, tmax) {   // as surface() in the shader (also from above), fewer steps
+    let t0 = 0, f0 = -1e-4;
+    const sg = Math.sign(dy), dt = Math.min(tmax, (LEVEL + 0.3 * sg - oy) / dy) / 6;
+    const f = (t) => { surf(ox + dx * t, oz + dz * t); return sg * (oy + dy * t - LEVEL - w3[0]); };
+    for (let i = 1; i <= 6; i++) {
+      let t1 = dt * i, f1 = f(t1);
+      if (f1 > 0) {
+        for (let j = 0; j < 2; j++) { const tm = t0 + (t1 - t0) * f0 / (f0 - f1), fm = f(tm); if (fm > 0) { t1 = tm; f1 = fm; } else { t0 = tm; f0 = fm; } }
+        return t0 + (t1 - t0) * f0 / (f0 - f1);
+      }
+      t0 = t1; f0 = f1;
+    }
+    return 1e9;
+  }
+  function wallLight(qx, qz, o) {   // as wallLight() in the shader: sun through the glass walls below the water line
+    o[0] = o[1] = o[2] = 0;
+    if (L.lamp) return;
+    for (let a = 0; a < 2; a++) {
+      const sg = Math.sign(a ? L.pos[2] : L.pos[0]), ci = Math.abs(a ? L.pos[2] : L.pos[0]);
+      if (ci < 0.02) continue;
+      refract(-L.pos[0], -L.pos[1], -L.pos[2], a ? 0 : sg, 0, a ? sg : 0, 1 / IOR);
+      const tn = sg * (a ? v[2] : v[0]), u = (sg * (a ? qz : qx) - (a ? TZ : TX)) / tn, ey = -v[1] * u, side = a ? qx - v[0] * u : qz - v[2] * u;
+      if (ey >= LEVEL - 0.03 || Math.abs(side) >= (a ? TX : TZ)) continue;
+      const k = 0.8 * (1 - fresnel(ci)) * -v[1] * ci / Math.abs(tn);
+      for (let n = 0; n < 3; n++) o[n] += k * Math.exp(-ABSORB[n] * u);
+    }
+  }
+  function floorColor(qx, qz, o) {
+    if(SWE){SWE.at(qx,qz,swe5);if(swe5[0]+LEVEL<.012){dryFloorColor(qx,qz,o);return;}}
+    const gx = Math.abs(qx * 5 - Math.floor(qx * 5) - 0.5), gz = Math.abs(qz * 5 - Math.floor(qz * 5) - 0.5);
+    const gr = Math.min(Math.max((Math.max(gx, gz) - 0.43) / 0.04, 0), 1), edge = Math.min(TX - Math.abs(qx), TZ - Math.abs(qz));
+    const shade = (OUTSIDE?(0.55 + 0.45 * Math.min(Math.max(edge / 0.3, 0), 1)):1) / Math.PI, alb = [0.78 - 0.42 * gr, 0.83 - 0.4 * gr, 0.82 - 0.37 * gr];
+    causticAt(qx, qz, c2); if(OUTSIDE)wallLight(qx,qz,ev);else ev.fill(0);
+    for (let n = 0; n < 3; n++) o[n] = alb[n] * shade * (L.col[n] * (c2[n] + ev[n]) + L.amb[n] * Math.exp(-ABSORB[n] * LEVEL * 1.5));
+  }
+  function water(px, py, pz, dx, dy, dz, o) {   // as water() in the shader
+    let r0 = 0, r1 = 0, r2 = 0, t0 = 1, t1 = 1, t2 = 1;
+    for (let i = 0; i < 3; i++) {
+      const tx = (Math.sign(dx) * TX - px) / dx, tz = (Math.sign(dz) * TZ - pz) / dz;
+      const tf = dy < 0 ? -py / dy : 1e9, ts = dy > 0 ? surfaceT(px, py, pz, dx, dy, dz, Math.min(tx, tz)) : 1e9;
+      const td = duckHit(px, py, pz, dx, dy, dz), t = Math.min(tf, ts, tx, tz, td);
+      const T0 = Math.exp(-ABSORB[0] * t), T1 = Math.exp(-ABSORB[1] * t), T2 = Math.exp(-ABSORB[2] * t);
+      r0 += t0 * L.glow[0] * (1 - T0); r1 += t1 * L.glow[1] * (1 - T1); r2 += t2 * L.glow[2] * (1 - T2);
+      t0 *= T0; t1 *= T1; t2 *= T2;
+      const qx = px + dx * t, qy = py + dy * t, qz = pz + dz * t;
+      if (t === td || t === tf) {   // the duck's hull, or the floor
+        if (t === td) duckColor(qx, qy, qz, c); else floorColor(qx, qz, c);
+        o[0] = r0 + t0 * c[0]; o[1] = r1 + t1 * c[1]; o[2] = r2 + t2 * c[2]; return;
+      }
+      let nx = 0, ny = 0, nz = 0;
+      if (t === ts) { surfNormal(qx, qz); nx = -v[0]; ny = -v[1]; nz = -v[2]; } else if (tx < tz) nx = -Math.sign(dx); else nz = -Math.sign(dz);
+      let F = 1;
+      if (refract(dx, dy, dz, nx, ny, nz, IOR)) {
+        F = fresnel(-(v[0] * nx + v[1] * ny + v[2] * nz));
+        if (t === ts) look(qx, qy, qz, v[0], v[1], v[2], c); else { background(qx, qy, qz, v[0], v[1], v[2], c); c[0] *= 0.9; c[1] *= 0.9; c[2] *= 0.9; }
+        r0 += t0 * (1 - F) * c[0]; r1 += t1 * (1 - F) * c[1]; r2 += t2 * (1 - F) * c[2];
+      }
+      t0 *= F; t1 *= F; t2 *= F;
+      const dn = 2 * (dx * nx + dy * ny + dz * nz);
+      dx -= dn * nx; dy -= dn * ny; dz -= dn * nz; px = qx + nx * 1e-3; py = qy + ny * 1e-3; pz = qz + nz * 1e-3;
+    }
+    o[0] = r0 + t0 * L.glow[0]; o[1] = r1 + t1 * L.glow[1]; o[2] = r2 + t2 * L.glow[2];
+  }
+  function trace(dx, dy, dz, o) {
+    const [ox, oy, oz] = cam.pos, b = boxHit(ox, oy, oz, dx, dy, dz);
+    if (!(b[0] < b[1] && b[0] > 0)) return background(ox, oy, oz, dx, dy, dz, o);
+    const px = ox + dx * b[0], py = oy + dy * b[0], pz = oz + dz * b[0];
+    let nx = 0, ny = 0, nz = 0, F = 0;
+    if (b[2] === 0) nx = -Math.sign(dx); else if (b[2] === 1) ny = -Math.sign(dy); else nz = -Math.sign(dz);
+    if (ny < 0.5) { const m = 1 - Math.abs(dx * nx + dz * nz), m2 = m * m; F = 0.04 + 0.96 * m2 * m2 * m; }
+    surf(px, pz);
+    if (ny < 0.5 && py < LEVEL + w3[0]) { refract(dx, dy, dz, nx, ny, nz, 1 / IOR); water(px, py, pz, v[0], v[1], v[2], o); }
+    else {
+      const t = dy < 0 ? surfaceT(px, py, pz, dx, dy, dz, b[1] - b[0] + 0.05) : 1e9, td = duckHit(px, py, pz, dx, dy, dz);
+      const qx = Math.min(Math.max(px + dx * t, -TX + 1e-3), TX - 1e-3), qz = Math.min(Math.max(pz + dz * t, -TZ + 1e-3), TZ - 1e-3);
+      if (td < Math.min(t, b[1] - b[0])) duckColor(px + dx * td, py + dy * td, pz + dz * td, o);   // the duck, above the water
+      else if (t < b[1] - b[0] + 0.05 && Math.abs(px + dx * t) < TX + 0.05 && Math.abs(pz + dz * t) < TZ + 0.05) {
+        surfNormal(qx, qz); const sx = v[0], sy = v[1], sz = v[2], d2 = 2 * (dx * sx + dy * sy + dz * sz), Fs = fresnel(-d2 / 2);
+        refract(dx, dy, dz, sx, sy, sz, 1 / IOR); water(qx, LEVEL + w3[0], qz, v[0], v[1], v[2], o);
+        look(qx, LEVEL, qz, dx - d2 * sx, dy - d2 * sy, dz - d2 * sz, c2);
+        for (let n = 0; n < 3; n++) o[n] = Fs * c2[n] + (1 - Fs) * o[n];
+        const cap=selected&&caps.get(selected);
+        if(cap){const r=cam.rot,u=Math.max(1,Math.min(126,Math.round((.5+.48*(sx*r[0]+sy*r[1]+sz*r[2]))*127))),v=Math.max(1,Math.min(126,Math.round((.5-.48*(sx*r[3]+sy*r[4]+sz*r[5]))*127))),k=(v*128+u)*4,strength=+$('causticCoating').value/100;
+          for(let n=0;n<3;n++)o[n]=o[n]*(1-strength)+Math.pow(cap[k+n]/255,2.2)*strength;
+        }
+
+      } else { const t2 = b[1]; background(ox + dx * t2, oy + dy * t2, oz + dz * t2, dx, dy, dz, o); o[0] *= 0.9; o[1] *= 0.9; o[2] *= 0.9; }
+    }
+    if (ny < 0.5) { const d2 = 2 * (dx * nx + dz * nz); sky(dx - d2 * nx, dy, dz - d2 * nz, c2); for (let n = 0; n < 3; n++) o[n] = F * c2[n] + (1 - F) * o[n] * [0.9, 0.96, 0.95][n]; }
+    const ex = Math.min(px + TX, TX - px), ey = Math.min(py, TOP - py), ez = Math.min(pz + TZ, TZ - pz);
+    const edge = ex + ey + ez - Math.max(ex, ey, ez) - Math.min(ex, ey, ez);
+    const fw = Math.max(0.01, b[0] * cam.tan * 2 / hRes / Math.max(Math.abs(dx * nx + dy * ny + dz * nz), 0.35));   // ~1 pixel, even edge-on
+    if (OUTSIDE && edge < fw * 1.6) { const k = 1 - Math.min(Math.max((edge - fw) / (0.6 * fw), 0), 1); for (let n = 0; n < 3; n++) o[n] += (0.05 - o[n]) * k; }
+  }
+  // camera: orbit with the pointer (as OrbitControls does on the GPU path)
+  const pointers = new Map(); let down = null;
+  canvas.addEventListener('pointerdown', (e) => {
+    canvas.setPointerCapture(e.pointerId); pointers.set(e.pointerId, [e.clientX, e.clientY]);
+    down = pointers.size === 1 ? [e.clientX, e.clientY, performance.now()] : null;
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    const p = pointers.get(e.pointerId);
+    if (!p) return;
+    if (!OUTSIDE) { const cm=camera(),rect=canvas.getBoundingClientRect(),u=(e.clientX-rect.left-rect.width/2)/rect.height*2*cm.tan,v=(e.clientY-rect.top-rect.height/2)/rect.height*2*cm.tan;poke(u*(cm.pos[1]-LEVEL),v*(cm.pos[1]-LEVEL)); }
+    else if (pointers.size === 1) { view.yaw -= (e.clientX - p[0]) * 0.006; view.pitch = Math.min(1.35, Math.max(0.06, view.pitch + (e.clientY - p[1]) * 0.005)); }
+    else {
+      const [a, b] = [...pointers.values()], before = Math.hypot(a[0] - b[0], a[1] - b[1]);
+      pointers.set(e.pointerId, [e.clientX, e.clientY]);
+      const [q, r] = [...pointers.values()];
+      view.dist = Math.min(14, Math.max(3.6, view.dist * before / Math.max(1, Math.hypot(q[0] - r[0], q[1] - r[1]))));
+    }
+    pointers.set(e.pointerId, [e.clientX, e.clientY]);
+  });
+  canvas.addEventListener('pointercancel', (e) => { pointers.delete(e.pointerId); down = null; });
+  canvas.addEventListener('wheel', (e) => { e.preventDefault(); view.dist = Math.min(14, Math.max(3.6, view.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+  function camera() {
+    if(!OUTSIDE){const height=TOP+6,aspect=canvas.clientWidth/Math.max(1,canvas.clientHeight);return {pos:[0,height,0],rot:[1,0,0,0,0,-1,0,1,0],tan:.97*Math.min(TZ,TX/aspect)/(height-LEVEL)};}
+    const cp = Math.cos(view.pitch), sp = Math.sin(view.pitch);
+    const pos = [TARGET[0] + view.dist * cp * Math.sin(view.yaw), TARGET[1] + view.dist * sp, TARGET[2] + view.dist * cp * Math.cos(view.yaw)];
+    const fw = [TARGET[0] - pos[0], TARGET[1] - pos[1], TARGET[2] - pos[2]], fl = Math.hypot(...fw), fx = fw[0] / fl, fy = fw[1] / fl, fz = fw[2] / fl;
+    const rl = Math.hypot(fz, fx), rx = -fz / rl, rz = fx / rl, ux = -rz * fy, uy = rz * fx - rx * fz, uz = rx * fy;
+    return { pos, rot: [rx, 0, rz, ux, uy, uz, -fx, -fy, -fz], tan: Math.tan(FOV * Math.PI / 360) / Math.min(1, canvas.clientWidth / Math.max(1, canvas.clientHeight)) };
+  }
+  canvas.addEventListener('pointerup', (e) => {   // a click (not a drag) on the water: a ripple
+    pointers.delete(e.pointerId);
+    const ok = down && Math.hypot(e.clientX - down[0], e.clientY - down[1]) < 6 && performance.now() - down[2] < 500;
+    down = null;
+    if (!ok) return;
+    const rect = canvas.getBoundingClientRect(), cm = camera(), r = cm.rot;
+    const u = ((e.clientX - rect.left) * 2 - rect.width) / rect.height * cm.tan, vv = (rect.height - (e.clientY - rect.top) * 2) / rect.height * cm.tan;
+    const d = [r[0] * u + r[3] * vv - r[6], r[1] * u + r[4] * vv - r[7], r[2] * u + r[5] * vv - r[8]], t = (LEVEL - cm.pos[1]) / d[1];
+    const x = cm.pos[0] + d[0] * t, z = cm.pos[2] + d[2] * t;
+    if (t > 0 && Math.abs(x) < TX && Math.abs(z) < TZ) poke(x, z);
+  });
+  return {
+    dropHeight(){return 8.4;},
+    airHeight(h){const safe=4.5;return safe*(1-Math.exp(-h/safe));},
+    project(p){const r=cam.rot,dx=p.x-cam.pos[0],dy=p.y-cam.pos[1],dz=p.z-cam.pos[2],depth=-(dx*r[6]+dy*r[7]+dz*r[8]);if(depth<=0)return null;const scale=canvas.clientHeight/(2*depth*cam.tan);return [canvas.clientWidth/2+(dx*r[0]+dy*r[1]+dz*r[2])*scale,canvas.clientHeight/2-(dx*r[3]+dy*r[4]+dz*r[5])*scale,scale];},
+    name: 'CPU fallback', minScale: 0.12, maxScale: 0.5, target: 24,
+    setView(yaw, pitch, dist) { Object.assign(view, { yaw, pitch, dist }); },
+    draw(dt, lit) {
+      cam = camera(); L = lit;
+      const cw = Math.round(canvas.clientWidth), ch = Math.round(canvas.clientHeight), w = Math.max(32, Math.round(cw * state.scale)), h = Math.max(24, Math.round(ch * state.scale));
+      hRes = h;
+      if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
+      if (!img || img.width !== w || img.height !== h) { low.width = w; low.height = h; img = lctx.createImageData(w, h); }
+      prepare(dt);
+      for(const D of DUCKS){if(!D.on)continue;const f=[Math.cos(D.head),Math.sin(D.head)],side=[-f[1],f[0]],sample=(a,b)=>{surf(D.x+f[0]*a+side[0]*b,D.z+f[1]*a+side[1]*b);return w3[0];};
+        const a=sample(FOOT[0]*.8,0),b=sample(-FOOT[0]*.8,0),c=sample(0,FOOT[1]*.8),e=sample(0,-FOOT[1]*.8),slope=(a-b)/(1.6*FOOT[0]),cross=(c-e)/(1.6*FOOT[1]);
+        D.surface=[(sample(0,0)*2+a+b+c+e)/6,f[0]*slope+side[0]*cross,f[1]*slope+side[1]*cross];keepAfloat(D);
+      }
+      const r = cam.rot, px = img.data;
+      for (let y = 0, k = 0; y < h; y++) for (let x = 0; x < w; x++, k += 4) {
+        const u = (2 * (x + 0.5) - w) / h * cam.tan, vv = (h - 2 * (y + 0.5)) / h * cam.tan;
+        let dx = r[0] * u + r[3] * vv - r[6], dy = r[1] * u + r[4] * vv - r[7], dz = r[2] * u + r[5] * vv - r[8];
+        const l = Math.sqrt(dx * dx + dy * dy + dz * dz); dx /= l; dy /= l; dz /= l;
+        trace(dx, dy, dz, c);
+        for (let n = 0; n < 3; n++) px[k + n] = LUT[Math.min(2047, Math.sqrt(Math.max(c[n], 0) / 16) * 2047 | 0)];
+        px[k + 3] = 255;
+      }
+      lctx.putImageData(img, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(low, 0, 0, canvas.width, canvas.height);
+      const dx = L.pos[0] - cam.pos[0], dy = L.pos[1] - cam.pos[1], dz = L.pos[2] - cam.pos[2], zc = -(dx * r[6] + dy * r[7] + dz * r[8]);
+      if (L.lamp && zc > 0) {   // the bulb
+        const sx = (dx * r[0] + dy * r[1] + dz * r[2]) / zc / cam.tan, sy = (dx * r[3] + dy * r[4] + dz * r[5]) / zc / cam.tan;
+        ctx.fillStyle = '#fff3d6'; ctx.beginPath(); ctx.arc(canvas.width / 2 + sx * canvas.height / 2, canvas.height / 2 - sy * canvas.height / 2, Math.max(2, 0.05 / zc / cam.tan * canvas.height / 2), 0, 7); ctx.fill();
+      }
+    },
+  };
+}
+
+// ================================================================= start-up, loop, input
+let canvas = $('view'), R = null;
+if (!new URLSearchParams(location.search).has('cpu'))
+  try { R = await gpuRenderer(canvas); } catch (e) { console.warn('three.js renderer unavailable, using the CPU:', e.message); const note=document.createElement('p');note.textContent='Using the simpler water picture on this device.';document.getElementById('moreSettings')?.append(note); }
+if (!R) {   // no WebGL 2 (or three.js could not load): a fresh canvas for the 2D context
+  const c2 = canvas.cloneNode(); canvas.replaceWith(c2); canvas = c2;
+  R = cpuRenderer(canvas);
+}
+state.scale = R.name.startsWith('CPU') ? 0.25 : G.ratio;
+if (innerWidth < 640) $('ui').open = false;
+
+const units = { elev: '°', az: '°', lampH: ' m', lampX: ' m' };
+for (const id of ['elev', 'az', 'lampH', 'lampX', 'waves', 'turb']) {
+  const show = () => { const x = +$(id).value; $(id + 'Out').textContent = units[id] ? x + units[id] : x.toFixed(2); };
+  $(id).addEventListener('input', show); show();
+}
+function setLamp(on) {
+  state.lamp = on; $('sunCtl').hidden = on; $('lampCtl').hidden = !on;
+  $('sun').setAttribute('aria-pressed', !on); $('lamp').setAttribute('aria-pressed', on);
+}
+$('sun').addEventListener('click', () => setLamp(false)); $('lamp').addEventListener('click', () => setLamp(true));
+$('duck').addEventListener('change', (e) => setDuckCount(+e.target.value));
+addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'range' && e.key !== ' ') return;
+  const k = e.key.toLowerCase();
+  if (k === ' ') { state.paused = !state.paused; e.preventDefault(); }
+  else if (k === 'h') $('ui').hidden = !$('ui').hidden;
+  else if (k === 'l') setLamp(!state.lamp);
+  else if (k === 'd') setDuckCount(duckCount() === 0 ? 1 : duckCount() === 1 ? 5 : 0);   // none, 1, 5
+  else if (k === 'r') addRipple((Math.random() * 2 - 1) * TX * 0.8, (Math.random() * 2 - 1) * TZ * 0.8);
+});
+window.lite = { dropDuck, splashDrops, splashCrowns, splashFluid, get impacts(){return impactCount;}, state, R, addRipple, poke, setLamp, DUCK, DUCKS, setDuckCount, visibleBounds, SWE };   // for scripted views and tests
+
+// ---------------------------------------------------------------- Tilt & play: the screen is a bottle of water
+// motion-water.js sends the phone's gravity reading as 'water-tilt' (m/s^2, in screen terms). The water stays level in
+// the world, so on the phone it leans toward the low side. A spring lets it overshoot and slosh back, and quick
+// movement throws ripples off the near wall and ruffles the whole surface for a moment.
+const KEYS = new Set();   // arrow keys held down
+const UNDER = { on: false }; window.lite.UNDER = UNDER;   // the device is upside down: the view is from under the water
+addEventListener('keydown', (e) => { if (e.key.toLowerCase() === 'f' && !BOTTLE.on && !e.target.matches?.('input,select')) UNDER.on = !UNDER.on; });   // no sensor (a computer): F turns it over
+addEventListener('keydown', (e) => { if (e.key.startsWith('Arrow') && !e.target.matches?.('input,select')) { KEYS.add(e.key.toLowerCase()); e.preventDefault(); } });
+addEventListener('keyup', (e) => KEYS.delete(e.key.toLowerCase()));
+addEventListener('blur', () => KEYS.clear());
+const BOTTLE = { on: false, a: [0, 0, 9.81], level: [0, 0, 9.81], last: null, s: [0, 0], v: [0, 0], shake: 0, emit: 0, wave: 0, turb: 0 };
+const BOTTLE_SPRING = 40, BOTTLE_DAMP = 2.4, BOTTLE_MAX = TANK_MODE ? 1.6 : 0.8;
+window.lite.BOTTLE = BOTTLE;   // for scripted views and tests   // how stiff the sloshing is (about once a second), how fast it dies down, steepest lean
+addEventListener('water-tilt', (ev) => {
+  const d = ev.detail, B = BOTTLE;
+  if (!d || d.off) { B.on = false; B.last = null; return; }
+  B.on = true; B.level = d.level || B.level;
+  const j = B.last ? Math.hypot(d.x - B.last[0], d.y - B.last[1], d.z - B.last[2]) / 9.81 : 0;   // how hard the phone was jerked, in g
+  B.shake = Math.min(2, Math.max(B.shake, j * 1.5));
+  B.a = [d.x, d.y, d.z]; B.last = B.a;
+});
+function bottleStep(dt) {
+  const B = BOTTLE;
+  let tx = 0, tz = 0;
+  if (SWE_ON) {   // the device is the box of water lying under the screen: its own readings push the water (gravity, whichever way it is held, and shaking)
+    let ax = 0, az = 0, g = 9.81;
+    if (B.on) {
+      if (B.a[2] < -3) UNDER.on = true; else if (B.a[2] > -1) UNDER.on = false;   // turned face down (past about 110 degrees) it is seen from under the water; turned back, from above
+      ax = -B.a[0]; az = UNDER.on ? -B.a[1] : B.a[1]; g = Math.max(2, UNDER.on ? -B.a[2] : B.a[2]);   // from underneath, the screen's up is the box's +z
+      if (Math.abs(ax) < 0.4) ax = 0; if (Math.abs(az) < 0.4) az = 0;
+    }   // a hand's small wobble (under about 2 degrees) is ignored
+    else {   // the arrows push the way you see them: right is screen right, up is away from you, from wherever the camera stands
+      const kx = 3 * (KEYS.has('arrowright') - KEYS.has('arrowleft')), ky = 3 * (KEYS.has('arrowup') - KEYS.has('arrowdown'));   // about 17 degrees
+      const yaw = OUTSIDE && R.viewYaw ? R.viewYaw() : 0, c = Math.cos(yaw), sn = Math.sin(yaw);
+      ax = kx * c - ky * sn; az = -kx * sn - ky * c;
+      if (UNDER.on) { ax = kx; az = ky; }   // seen from underneath: screen up is the box's +z
+    }   // no sensor (a computer): the arrow keys tip the box (the water runs the way the arrow points), about 30 degrees   // the push on the water is minus the reading (the screen's up is the box's -z); how hard it presses on the floor is the part of gravity into the screen
+    const ease = 1 - Math.exp(-dt / 0.3), P = SWE_PUSH;   // the push eases in over about a third of a second, so the water does not jump at every twitch
+    P[0] += (ax - P[0]) * ease; P[1] += (az - P[1]) * ease; P[2] += (g - P[2]) * ease; ax = P[0]; az = P[1]; g = P[2];
+    if (B.kick && B.kick.t > 0) { ax += B.kick.a; B.kick.t -= dt; }   // the Splash button's shove (not eased: it is a shove)
+    if (!state.paused) SWE.step(dt, Math.max(-30, Math.min(30, ax)), Math.max(-30, Math.min(30, az)), g);
+    if (R.setSwe) R.setSwe(SWE);
+  } else if (B.on && TANK_MODE) {   // the phone held up is the tank: the water stays level, so it slopes against the tank's own up (screen y)
+    const up = Math.max(2, B.a[1]);   // lying flat or upside down, it leans as far as it can
+    tx = -B.a[0] / up;   // sideways: the water leans to the low side
+    tz = -B.a[2] / up;   // forward and back too: tip the device away and the water runs to the back wall, tip it toward you and it runs to the front glass
+    const jolt = B.lastTx === undefined ? 0 : tx - B.lastTx; B.lastTx = tx;
+    if (Math.abs(jolt) > 0.05) B.v[0] += jolt * 6;   // a quick shake shoves the whole body of water, not only leans it (small hand wobble is ignored)
+  } else if (B.on) {   // where the water wants to lean: the part of gravity along the screen, toward the low side
+    const fx = (B.a[0] - B.level[0]) / 9.81, fy = (B.a[1] - B.level[1]) / 9.81, m = Math.hypot(fx, fy), f = Math.min(m, 0.7);
+    const k = m > 1e-6 ? f / m / Math.sqrt(1 - f * f) : 0;
+    tx = -fx * k; tz = fy * k;   // the screen's up is the tank's -z
+  }
+  const n = Math.max(1, Math.ceil(dt / 0.008)), h = dt / n;
+  for (let i = 0; i < n; i++) for (let a = 0; a < 2; a++) {
+    const t = a ? tz : tx;
+    B.v[a] += (BOTTLE_SPRING * (t - B.s[a]) - BOTTLE_DAMP * B.v[a]) * h;
+    B.s[a] = Math.max(-BOTTLE_MAX, Math.min(BOTTLE_MAX, B.s[a] + B.v[a] * h));
+  }
+  TILT[0] = B.s[0]; TILT[1] = B.s[1];
+  if (R.setTilt) R.setTilt(TILT[0], TILT[1]);
+  // sloshing and shaking ruffle the water; it settles again in a second or two
+  const speed = Math.hypot(B.v[0], B.v[1]);
+  B.shake *= Math.exp(-dt * 1.6);
+  const energy = Math.min(1.5, speed * 0.3 + B.shake);
+  const calm = TANK_MODE ? 0.7 : .42;   // the fish tank is small, so it gets smaller splashes and fewer of them
+  B.wave = Math.min(0.8, energy * 0.7) * calm; B.turb = Math.min(0.7, energy * 0.5) * calm;
+  if (state.paused) return;
+  for (B.emit += dt * energy * 24 * calm; B.emit >= 1; B.emit -= 1) {   // splashes where the water hits the wall it is moving toward
+    let ux = B.v[0], uz = B.v[1], len = Math.hypot(ux, uz);
+    if (len < 0.05) { const a = Math.random() * 6.283; ux = Math.cos(a); uz = Math.sin(a); len = 1; }
+    ux /= len; uz /= len;
+    const edge = Math.min(visibleBounds.x / Math.max(Math.abs(ux), 1e-3), visibleBounds.z / Math.max(Math.abs(uz), 1e-3)) * 0.85, side = (Math.random() - 0.5) * 0.9;
+    addRipple(ux * edge - uz * side * visibleBounds.x, uz * edge + ux * side * visibleBounds.z, (4 + energy * 9 * (0.5 + Math.random())) * calm, (0.07 + 0.06 * Math.random()) * (TANK_MODE ? 0.6 : 1));
+  }
+}
+if (new URLSearchParams(location.search).has('motion')) {   // Tilt & play starts calm: the movement comes from the phone
+  if (R.setBottle) R.setBottle(true);
+  for (const [id, v] of [['waves', 0.18], ['turb', 0.1]]) { const e = $(id); if (e) { e.value = v; e.dispatchEvent(new Event('input', { bubbles: true })); } }
+}
+if (TANK_MODE || SWE_ON) {   // the fish tank and the water box know which way is down, and in the app the sensor starts by itself
+  const ready = (go) => document.readyState === 'complete' ? go() : addEventListener('load', go);   // this script may run after the page has loaded
+  ready(() => setTimeout(() => {
+    for (const id of ['neutralMotion', 'flatMotion']) document.getElementById(id)?.remove();
+    const said = document.getElementById('motionStatus'); if (said) said.textContent = TANK_MODE ? 'Hold the device up: it is the fish tank. Tilt it or shake it.' : 'The device is a box of water: tip it any way, or shake it.';
+    if (window.AndroidMotion && !BOTTLE.on) document.getElementById('enableMotion')?.click();
+  }, 300));
+  // a Splash button: a hard slosh to one side and a splash in the middle, as if the tank was knocked
+  const splash = document.createElement('button');
+  splash.id = 'tankSplash'; splash.className = 'btn primary'; splash.textContent = 'Splash';
+  splash.style.cssText = 'position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom));transform:translateX(-50%);z-index:9;min-width:140px;min-height:48px;font-size:16px;border-radius:24px';
+  splash.onclick = () => {dispatchEvent(new Event('water-splash-sound'));
+    BOTTLE.shake = Math.max(BOTTLE.shake, 1.2); BOTTLE.v[0] += (Math.random() < 0.5 ? -1 : 1) * 1.4; BOTTLE.kick = { a: (Math.random() < 0.5 ? -1 : 1) * 6, t: 0.14 };
+    addRipple((Math.random() - 0.5) * TX, (Math.random() - 0.5) * TZ, 12, 0.065);
+  };
+  document.body.append(splash);
+}
+
+// how many ducks, and (fish tank) whether the tiled background shows; both are remembered
+{
+  let n = TANK_MODE || SWE_ON ? 1 : 0;
+  try { const v = localStorage.getItem(TANK_MODE ? 'water.tankDucks' : SWE_ON ? 'water.boxDucks' : 'water.lightDucks'); if(v!==null&&Number.isInteger(+v)&&+v>=0&&+v<=MAX_DUCKS)n=+v; } catch {}   // none, 1 or 5; anything else saved before starts with 1
+  setDuckCount(n);
+  if (TANK_MODE) {
+    const row = $('tankBgRow'), box = $('tankBg'); row.hidden = false;
+    try { box.checked = localStorage.getItem('water.tankBackground') === '1'; } catch {}
+    const apply = () => { if (R.setPlain) R.setPlain(!box.checked); try { localStorage.setItem('water.tankBackground', box.checked ? '1' : '0'); } catch {} };
+    box.addEventListener('change', apply); apply();
+  }
+}
+
+$('outsideRow').hidden=true;
+
+if (SWE_ON) {   // how small the floor tiles look (remembered)
+  const tiles = $('boxTiles'), tilesOut = $('boxTilesLabel').querySelector('output');
+  tiles.hidden = $('boxTilesLabel').hidden = false;
+  tiles.value='24';try{if(!localStorage.getItem('water.boxSmallTilesDefault')){localStorage.setItem('water.boxTiles','24');localStorage.setItem('water.boxSmallTilesDefault','1');}tiles.value=localStorage.getItem('water.boxTiles')||'24';}catch{}
+  const setTiles = () => { tilesOut.textContent = tiles.value > 17 ? 'small' : tiles.value < 10 ? 'big' : 'medium'; if (R.setTiles) R.setTiles(+tiles.value); try { localStorage.setItem('water.boxTiles', tiles.value); } catch {} };
+  tiles.addEventListener('input', setTiles); setTiles();
+}
+if (SWE_ON) {   // how much water is in the box (remembered)
+  const fill = $('tankFill'), fillOut = $('tankFillLabel').querySelector('output');
+  fill.hidden = $('tankFillLabel').hidden = false;
+  try { fill.value = localStorage.getItem('water.boxFill') || '100'; } catch {}
+  const setFill = (reset) => { fillOut.textContent = fill.value + '%'; if (reset) SWE.fill(LEVEL * fill.value / 100); try { localStorage.setItem('water.boxFill', fill.value); } catch {} };
+  fill.addEventListener('change', () => setFill(true)); fill.addEventListener('input', () => { fillOut.textContent = fill.value + '%'; }); setFill(true);
+}
+
+// render resolution adapts to hold a smooth frame rate: down quickly when slow, up slowly when there is room
+let last = performance.now(), frames = 0, elapsed = 0, calmUntil = 0;
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.1, (now - last) / 1000), live = state.paused ? 0 : dt;
+  last = now; state.t += live; frames++; elapsed += dt;
+  if (elapsed > 0.5) {
+    const fps = frames / elapsed;
+    if (fps < R.target * 0.9) { state.scale = Math.max(R.minScale, state.scale * 0.85); calmUntil = now + 2500; }
+    else if (fps > R.target * 1.12 && now > calmUntil) state.scale = Math.min(R.maxScale, state.scale * 1.08);
+    $('stats').textContent = `${R.name} · ${fps.toFixed(0)} fps · ${Math.round(state.scale * 100)}% res`;
+    frames = 0; elapsed = 0;
+  }
+  stepSplash(live);
+  bottleStep(live);
+  state.waves = +$('waves').value + BOTTLE.wave; state.turb = Math.min(1, +$('turb').value + BOTTLE.turb);
+  if (live > 0) turbulence(live);
+  waveHeights(state.t, state.waves, state.turb);
+  R.draw(live, light());
+  dispatchEvent(new Event('water-rendered'));
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
+
+

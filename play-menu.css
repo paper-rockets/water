@@ -1,0 +1,48 @@
+/* Shared touch menu for every water scene. */
+#ui{--ink:#eff9f8;--muted:#b1cbc9;--aqua:#a6ede3;--panel:#0e252b;width:368px;max-width:calc(100vw - 24px);padding:22px;background:var(--panel);border:0;border-radius:24px;color:var(--ink);box-shadow:0 16px 56px #0006;backdrop-filter:none;font:16px/1.4 ui-rounded,"Segoe UI",system-ui,sans-serif;scrollbar-color:#638a87 var(--panel);caret-color:var(--aqua)}
+#ui *::selection{background:#a6ede3;color:#123238}
+#ui .top{align-items:center;margin:0 0 26px;gap:12px}
+#ui h1{font-size:25px;letter-spacing:-.02em;font-weight:750;color:var(--ink)}
+#ui .muted{font-size:14px;color:var(--muted);margin-top:5px}
+#ui .close{width:48px;height:48px;flex:none;border-radius:50%;background:#ffffff0c;margin:0;color:var(--ink);font-size:30px}
+#ui .field{margin-bottom:26px}
+#ui .field-label,#ui #modeFields label{font-size:16px;line-height:1.4;font-weight:650;color:var(--ink);margin-bottom:12px}
+#ui output{font-size:13px;font-weight:500;color:var(--muted);font-variant-numeric:tabular-nums}
+#ui select{font:inherit;min-height:50px;background:#19373e;border:1px solid #59757a;border-radius:12px;color:var(--ink)}
+#ui [hidden],#ui select[hidden],#ui #pause,#ui #poolPause,#ui #scenePause,#ui #full{display:none!important}
+#ui .buttons{display:none!important}
+#ui .scene-picker{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+#ui .scene-choice{min-height:75px;border:1px solid #4b696d;border-radius:12px;background:transparent;color:#d5e9e6;padding:9px 8px;display:flex;align-items:center;gap:10px;text-align:left;cursor:pointer;font:600 14px/1.25 system-ui}
+#ui .scene-choice svg{width:34px;height:28px;flex:none;color:#94d5cf}
+#ui .scene-choice span{font:600 14px/1.3 system-ui}
+#ui .scene-choice[aria-pressed=true]{background:var(--aqua);border-color:var(--aqua);color:#13393c}
+#ui .scene-choice[aria-pressed=true] svg{color:#215553}
+#ui .look-picker{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:13px 4px}
+#ui .look-choice{position:relative;min-width:0;min-height:88px;padding:4px 1px;border:0;background:none;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:7px;cursor:pointer;border-radius:12px}
+#ui .look-choice img{display:block;max-width:100%;width:58px;height:58px;border-radius:50%;outline:2px solid transparent;outline-offset:3px;box-shadow:0 4px 8px #0004}
+#ui .look-choice span{font:500 11px/1.2 system-ui;text-align:center;overflow-wrap:anywhere}
+#ui .look-choice[aria-pressed=true]{color:var(--ink)}
+#ui .look-choice[aria-pressed=true] img{outline-color:var(--aqua)}
+#ui .look-choice[aria-pressed=true]::after{content:'✓';position:absolute;top:1px;right:4px;width:19px;height:19px;border-radius:50%;background:var(--aqua);color:#143c3c;font:700 13px/19px system-ui;text-align:center}
+#ui input[type=range]{appearance:none;-webkit-appearance:none;height:42px;background:transparent;accent-color:var(--aqua);touch-action:pan-y;cursor:pointer}
+#ui input[type=range]::-webkit-slider-runnable-track{height:8px;background:#476569;border-radius:8px}
+#ui input[type=range]::-webkit-slider-thumb{appearance:none;-webkit-appearance:none;width:28px;height:28px;margin-top:-10px;border-radius:50%;background:var(--aqua);border:3px solid #e6fffa;box-shadow:0 2px 5px #0004}
+#ui input[type=range]::-moz-range-track{height:8px;background:#476569;border-radius:8px}
+#ui input[type=range]::-moz-range-thumb{width:23px;height:23px;border-radius:50%;background:var(--aqua);border:3px solid #e6fffa}
+#ui .swatches{gap:6px;display:grid;grid-template-columns:repeat(6,minmax(0,1fr))}
+#ui .swatch{width:100%;height:auto;min-height:44px;aspect-ratio:1;border:2px solid #ffffff50;max-width:48px}
+#ui .btn,#ui #modeFields button{min-height:48px;font-size:15px}
+#ui #moreSettings{border-top:1px solid #3b565b;padding-top:4px;margin-top:8px}
+#ui #moreSettings>summary{font:600 15px/1.4 system-ui;color:var(--muted);padding:16px 0;min-height:52px}
+#ui #moreSettings p{font-size:12px;color:var(--muted)}
+#ui #moreSettings .field{margin-top:20px}
+#ui .back-to-water{position:static;display:block;width:100%;min-height:52px;border:0;border-radius:14px;background:var(--aqua);color:#173c3c;font:700 17px system-ui;cursor:pointer;margin-top:14px}
+#open{font:650 16px system-ui;min-height:50px;padding:12px 18px;border:0;border-radius:16px;background:#15353bee;color:#eafffa;box-shadow:0 5px 18px #0004}
+#ui :is(button,select,input,summary):focus-visible,#open:focus-visible{outline:3px solid #ffd6e4;outline-offset:3px}
+#ui button:active{filter:brightness(.88)}
+@media(hover:hover){#ui .look-choice:hover img{outline-color:#d3e7e4}#ui .scene-choice:hover{border-color:var(--aqua)}}
+@media(max-width:600px){#ui{top:12px;right:12px;width:368px;max-height:calc(100dvh - 24px);padding:20px}#open{top:14px;right:14px}}
+@media(max-width:359px){#ui{padding:16px}#ui .look-choice img{width:51px;height:51px}#ui .look-choice span{font-size:10px}#ui .scene-choice{gap:7px}#ui .scene-choice svg{width:27px}}
+@media(prefers-reduced-motion:reduce){#ui,#open{transition:none}}
+
+#ui{scrollbar-width:none;-ms-overflow-style:none}#ui::-webkit-scrollbar{display:none;width:0;height:0}
